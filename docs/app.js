@@ -16,7 +16,8 @@
 
   const MODEL_PATHS = {
     vad: withAssetVersion("./models/silero_vad.onnx"),
-    smartTurn: withAssetVersion("./models/smart-turn-v3.2-cpu.onnx"),
+    smartTurnCpu: withAssetVersion("./models/smart-turn-v3.2-cpu.onnx"),
+    smartTurnGpu: withAssetVersion("./models/smart-turn-v3.2-gpu.onnx"),
   };
 
   let ort = window.ort;
@@ -568,8 +569,9 @@
       executionProviders: [backend],
       graphOptimizationLevel: "all",
     };
+    const smartTurnModelPath = backend === "webgpu" ? MODEL_PATHS.smartTurnGpu : MODEL_PATHS.smartTurnCpu;
     const vadSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
-    const smartSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurn, sessionOptions);
+    const smartSession = await ortRuntime.InferenceSession.create(smartTurnModelPath, sessionOptions);
     if (backend === "webgpu") {
       await validateModelSessions(ortRuntime, vadSession, smartSession);
     }
@@ -831,12 +833,14 @@
     }
     els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Segment ${durationSec.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
-    const li = document.createElement("li");
-    const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    li.innerHTML = `<span>${time}</span><strong>${complete ? "Complete" : "Incomplete"}</strong><span>${result.probability.toFixed(3)}</span><span>${durationSec.toFixed(2)} s</span>`;
-    els.historyList.prepend(li);
-    while (els.historyList.children.length > 20) {
-      els.historyList.lastElementChild.remove();
+    if (els.historyList) {
+      const li = document.createElement("li");
+      const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      li.innerHTML = `<span>${time}</span><strong>${complete ? "Complete" : "Incomplete"}</strong><span>${result.probability.toFixed(3)}</span><span>${durationSec.toFixed(2)} s</span>`;
+      els.historyList.prepend(li);
+      while (els.historyList.children.length > 20) {
+        els.historyList.lastElementChild.remove();
+      }
     }
   }
 
