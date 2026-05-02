@@ -1,4 +1,4 @@
-(() => {
+(async () => {
   "use strict";
 
   const RATE = 16000;
@@ -9,11 +9,16 @@
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
   const SMART_INPUT_SAMPLES = RATE * MAX_DURATION_SECONDS;
+  const SMART_INPUT_FRAMES = SMART_INPUT_SAMPLES / 160;
+  const ORT_WEBGPU_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/ort.webgpu.min.mjs";
+  const ORT_WEBGPU_WASM_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/";
 
   const MODEL_PATHS = {
     vad: "./models/silero_vad.onnx",
     smartTurn: "./models/smart-turn-v3.2-cpu.onnx",
   };
+
+  let ort = window.ort;
 
   const els = {
     startButton: document.getElementById("startButton"),
@@ -22,6 +27,11 @@
     vadText: document.getElementById("vadText"),
     predictionText: document.getElementById("predictionText"),
     probabilityText: document.getElementById("probabilityText"),
+    vadAvgText: document.getElementById("vadAvgText"),
+    smartTurnAvgText: document.getElementById("smartTurnAvgText"),
+    featureAvgText: document.getElementById("featureAvgText"),
+    onnxAvgText: document.getElementById("onnxAvgText"),
+    backendText: document.getElementById("backendText"),
     detailText: document.getElementById("detailText"),
     graphCanvas: document.getElementById("graphCanvas"),
     historyList: document.getElementById("historyList"),
@@ -39,6 +49,9 @@
     resampler: null,
     vad: null,
     smartTurn: null,
+    featureExtractor: null,
+    inferenceBackend: "--",
+    featureBackend: "--",
     vadQueue: [],
     vadBusy: false,
     speechActive: false,
@@ -53,6 +66,19 @@
     waveformHistory: [],
     vadHistory: [],
     turnHistory: [],
+    timings: {
+      vad: { total: 0, count: 0 },
+      smartTurn: { total: 0, count: 0 },
+      feature: { total: 0, count: 0 },
+      onnx: { total: 0, count: 0 },
+    },
+  };
+
+  const timingOutputs = {
+    vad: "vadAvgText",
+    smartTurn: "smartTurnAvgText",
+    feature: "featureAvgText",
+    onnx: "onnxAvgText",
   };
 
   const chunkMs = (CHUNK / RATE) * 1000;
@@ -144,25 +170,34 @@
   }
 
   class SmartTurnPredictor {
-    constructor(session) {
+    constructor(session, extractor) {
       this.session = session;
-      this.extractor = new WhisperFeatureExtractor();
+      this.extractor = extractor;
     }
 
     async predict(audio) {
+      const featureStarted = performance.now();
       const features = await this.extractor.extract(audio);
+      const featureMs = performance.now() - featureStarted;
       const input = new ort.Tensor("float32", features, [1, 80, 800]);
+
+      const onnxStarted = performance.now();
       const outputs = await this.session.run({ input_features: input });
+      const onnxMs = performance.now() - onnxStarted;
       const firstOutput = outputs[this.session.outputNames[0]];
       const probability = Number(firstOutput.data[0]);
       return {
         prediction: probability > 0.5 ? 1 : 0,
         probability,
+        timings: {
+          featureMs,
+          onnxMs,
+        },
       };
     }
   }
 
-  class WhisperFeatureExtractor {
+  class BuiltInWhisperFeatureExtractor {
     constructor() {
       this.nFft = 400;
       this.hopLength = 160;
@@ -170,35 +205,35 @@
       this.nFrames = 800;
       this.eps = 1e-10;
       this.window = makeHannWindow(this.nFft);
-      this.dft = makeDftTables(this.nFft);
+      this.fftPlan = makeFft400Plan();
       this.melFilters = makeMelFilters(RATE, this.nFft, this.nMels);
     }
 
-    async extract(audio) {
-      const samples = normalizeAudio(padOrTrimLast(audio, SMART_INPUT_SAMPLES));
+    extract(audio) {
+      const samples = normalizePaddedAudio(audio, SMART_INPUT_SAMPLES);
       const padded = reflectPad(samples, this.nFft / 2);
       const frameCount = Math.floor((padded.length - this.nFft) / this.hopLength) + 1;
+      const frameLimit = Math.min(frameCount - 1, this.nFrames);
       const mel = new Float32Array(this.nMels * this.nFrames);
       const power = new Float32Array(this.nFft / 2 + 1);
       let globalMax = -Infinity;
 
-      for (let frame = 0; frame < Math.min(frameCount - 1, this.nFrames); frame += 1) {
+      for (let frame = 0; frame < frameLimit; frame += 1) {
         const start = frame * this.hopLength;
-        powerSpectrumInto(power, padded, start, this.window, this.dft);
+        powerSpectrumInto(power, padded, start, this.window, this.fftPlan);
         for (let m = 0; m < this.nMels; m += 1) {
           let energy = 0;
           const filter = this.melFilters[m];
-          for (let k = 0; k < filter.length; k += 1) {
-            energy += filter[k] * power[k];
+          const weights = filter.weights;
+          const filterStart = filter.start;
+          for (let i = 0; i < weights.length; i += 1) {
+            energy += weights[i] * power[filterStart + i];
           }
           const value = Math.log10(Math.max(energy, this.eps));
           mel[m * this.nFrames + frame] = value;
           if (value > globalMax) {
             globalMax = value;
           }
-        }
-        if (frame > 0 && frame % 40 === 0) {
-          await nextAnimationFrame();
         }
       }
 
@@ -210,31 +245,34 @@
     }
   }
 
-  function padOrTrimLast(audio, length) {
+  function normalizePaddedAudio(audio, length) {
     const out = new Float32Array(length);
-    if (audio.length >= length) {
-      out.set(audio.slice(audio.length - length));
-    } else {
-      out.set(audio, length - audio.length);
-    }
-    return out;
-  }
-
-  function normalizeAudio(audio) {
     let sum = 0;
-    for (let i = 0; i < audio.length; i += 1) {
-      sum += audio[i];
+    if (audio.length >= length) {
+      const start = audio.length - length;
+      for (let i = 0; i < length; i += 1) {
+        const value = audio[start + i];
+        out[i] = value;
+        sum += value;
+      }
+    } else {
+      const offset = length - audio.length;
+      for (let i = 0; i < audio.length; i += 1) {
+        const value = audio[i];
+        out[offset + i] = value;
+        sum += value;
+      }
     }
-    const mean = sum / audio.length;
+
+    const mean = sum / length;
     let variance = 0;
-    for (let i = 0; i < audio.length; i += 1) {
-      const diff = audio[i] - mean;
+    for (let i = 0; i < out.length; i += 1) {
+      const diff = out[i] - mean;
       variance += diff * diff;
     }
-    const scale = Math.sqrt(variance / audio.length + 1e-7);
-    const out = new Float32Array(audio.length);
-    for (let i = 0; i < audio.length; i += 1) {
-      out[i] = (audio[i] - mean) / scale;
+    const scale = Math.sqrt(variance / length + 1e-7);
+    for (let i = 0; i < out.length; i += 1) {
+      out[i] = (out[i] - mean) / scale;
     }
     return out;
   }
@@ -243,7 +281,7 @@
     const out = new Float32Array(audio.length + pad * 2);
     for (let i = 0; i < pad; i += 1) {
       out[i] = audio[pad - i];
-      out[out.length - 1 - i] = audio[audio.length - 2 - i];
+      out[pad + audio.length + i] = audio[audio.length - 2 - i];
     }
     out.set(audio, pad);
     return out;
@@ -257,40 +295,100 @@
     return win;
   }
 
-  function makeDftTables(size) {
-    const bins = size / 2 + 1;
-    const cos = new Array(bins);
-    const sin = new Array(bins);
-    for (let k = 0; k < bins; k += 1) {
-      cos[k] = new Float32Array(size);
-      sin[k] = new Float32Array(size);
+  // 400 = 16 * 25, matching Whisper's n_fft without zero-padding to a different model input.
+  function makeFft400Plan() {
+    const n1 = 16;
+    const n2 = 25;
+    const bins = 201;
+    const table1 = makeDftTable(n1);
+    const secondStage = makeSecondStageTable(n1, n2, bins);
+    return {
+      n1,
+      n2,
+      bins,
+      cos1: table1.cos,
+      sin1: table1.sin,
+      secondStageCos: secondStage.cos,
+      secondStageSin: secondStage.sin,
+      stageReal: new Float32Array(n1 * n2),
+      stageImag: new Float32Array(n1 * n2),
+      frameValues: new Float32Array(n1),
+    };
+  }
+
+  function makeDftTable(size) {
+    const cos = new Float32Array(size * size);
+    const sin = new Float32Array(size * size);
+    for (let k = 0; k < size; k += 1) {
+      const row = k * size;
       for (let n = 0; n < size; n += 1) {
         const phase = (2 * Math.PI * k * n) / size;
-        cos[k][n] = Math.cos(phase);
-        sin[k][n] = Math.sin(phase);
+        cos[row + n] = Math.cos(phase);
+        sin[row + n] = Math.sin(phase);
       }
     }
     return { cos, sin };
   }
 
-  function powerSpectrumInto(power, samples, start, window, dft) {
-    const bins = dft.cos.length;
-    for (let k = 0; k < bins; k += 1) {
-      let real = 0;
-      let imag = 0;
-      const cos = dft.cos[k];
-      const sin = dft.sin[k];
-      for (let n = 0; n < window.length; n += 1) {
-        const value = samples[start + n] * window[n];
-        real += value * cos[n];
-        imag -= value * sin[n];
+  function makeSecondStageTable(n1, n2, bins) {
+    const cos = new Float32Array(bins * n2);
+    const sin = new Float32Array(bins * n2);
+    const n = n1 * n2;
+    for (let bin = 0; bin < bins; bin += 1) {
+      const k1 = bin % n1;
+      const k2 = Math.floor(bin / n1);
+      const row = bin * n2;
+      for (let n2Index = 0; n2Index < n2; n2Index += 1) {
+        const phase = 2 * Math.PI * ((n2Index * k1) / n + (n2Index * k2) / n2);
+        cos[row + n2Index] = Math.cos(phase);
+        sin[row + n2Index] = Math.sin(phase);
       }
-      power[k] = real * real + imag * imag;
     }
+    return { cos, sin };
   }
 
-  function nextAnimationFrame() {
-    return new Promise((resolve) => requestAnimationFrame(resolve));
+  function powerSpectrumInto(power, samples, start, window, plan) {
+    const { n1, n2, bins, cos1, sin1, secondStageCos, secondStageSin, stageReal, stageImag, frameValues } = plan;
+
+    for (let n2Index = 0; n2Index < n2; n2Index += 1) {
+      for (let n1Index = 0; n1Index < n1; n1Index += 1) {
+        const sampleIndex = n2Index + n2 * n1Index;
+        frameValues[n1Index] = samples[start + sampleIndex] * window[sampleIndex];
+      }
+      for (let k1 = 0; k1 < n1; k1 += 1) {
+        let real = 0;
+        let imag = 0;
+        const tableOffset = k1 * n1;
+        for (let n1Index = 0; n1Index < n1; n1Index += 1) {
+          const tableIndex = tableOffset + n1Index;
+          const value = frameValues[n1Index];
+          real += value * cos1[tableIndex];
+          imag -= value * sin1[tableIndex];
+        }
+        const stageIndex = k1 * n2 + n2Index;
+        stageReal[stageIndex] = real;
+        stageImag[stageIndex] = imag;
+      }
+    }
+
+    for (let bin = 0; bin < bins; bin += 1) {
+      const k1 = bin % n1;
+      const stageOffset = k1 * n2;
+      const tableOffset = bin * n2;
+      let real = 0;
+      let imag = 0;
+      for (let n2Index = 0; n2Index < n2; n2Index += 1) {
+        const inputIndex = stageOffset + n2Index;
+        const tableIndex = tableOffset + n2Index;
+        const inputReal = stageReal[inputIndex];
+        const inputImag = stageImag[inputIndex];
+        const tableReal = secondStageCos[tableIndex];
+        const tableImag = secondStageSin[tableIndex];
+        real += inputReal * tableReal + inputImag * tableImag;
+        imag += inputImag * tableReal - inputReal * tableImag;
+      }
+      power[bin] = real * real + imag * imag;
+    }
   }
 
   function makeMelFilters(sampleRate, nFft, nMels) {
@@ -322,7 +420,19 @@
         const upper = (right - freq) / (right - center);
         filter[k] = Math.max(0, Math.min(lower, upper)) * enorm;
       }
-      filters.push(filter);
+
+      let start = 0;
+      while (start < filter.length && filter[start] === 0) {
+        start += 1;
+      }
+      let end = filter.length - 1;
+      while (end >= start && filter[end] === 0) {
+        end -= 1;
+      }
+      filters.push({
+        start,
+        weights: start <= end ? filter.slice(start, end + 1) : new Float32Array(0),
+      });
     }
     return filters;
   }
@@ -349,6 +459,100 @@
     return minLogHz * Math.exp(logStep * (mel - minLogMel));
   }
 
+  async function ensureFeatureExtractor() {
+    if (state.featureExtractor) {
+      return;
+    }
+
+    state.featureExtractor = new BuiltInWhisperFeatureExtractor();
+    state.featureBackend = "Built-in";
+    updateBackendText();
+  }
+
+  async function ensureOrtRuntime() {
+    if (state.vad && state.smartTurn) {
+      return;
+    }
+
+    const wantsWebGpu = await canUseWebGpu();
+    if (wantsWebGpu) {
+      try {
+        const webgpuOrt = await import(ORT_WEBGPU_URL);
+        configureOrt(webgpuOrt, "webgpu");
+        await createModelSessions(webgpuOrt, "webgpu");
+        return;
+      } catch (error) {
+        console.warn("WebGPU backend failed; falling back to WASM.", error);
+      }
+    }
+
+    const wasmOrt = window.ort || ort;
+    if (!wasmOrt) {
+      throw new Error("ONNX Runtime Web is not available.");
+    }
+    configureOrt(wasmOrt, "wasm");
+    await createModelSessions(wasmOrt, "wasm");
+  }
+
+  async function canUseWebGpu() {
+    if (!navigator.gpu) {
+      return false;
+    }
+    try {
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+      return Boolean(adapter);
+    } catch (error) {
+      console.warn("WebGPU adapter check failed.", error);
+      return false;
+    }
+  }
+
+  function configureOrt(ortRuntime, backend) {
+    ort = ortRuntime;
+    if (backend === "webgpu") {
+      ort.env.wasm.wasmPaths = {
+        mjs: `${ORT_WEBGPU_WASM_BASE}ort-wasm-simd-threaded.jsep.mjs`,
+        wasm: `${ORT_WEBGPU_WASM_BASE}ort-wasm-simd-threaded.jsep.wasm`,
+      };
+      ort.env.webgpu.powerPreference = "high-performance";
+    } else {
+      ort.env.wasm.wasmPaths = "./vendor/";
+    }
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
+  }
+
+  async function createModelSessions(ortRuntime, backend) {
+    const sessionOptions = {
+      executionProviders: [backend],
+      graphOptimizationLevel: "all",
+    };
+    const vadSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
+    const smartSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurn, sessionOptions);
+    if (backend === "webgpu") {
+      await validateModelSessions(ortRuntime, vadSession, smartSession);
+    }
+    state.vad = new SileroVAD(vadSession);
+    state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor);
+    state.inferenceBackend = backend.toUpperCase();
+    updateBackendText();
+  }
+
+  async function validateModelSessions(ortRuntime, vadSession, smartSession) {
+    await vadSession.run({
+      input: new ortRuntime.Tensor("float32", new Float32Array(64 + CHUNK), [1, 64 + CHUNK]),
+      state: new ortRuntime.Tensor("float32", new Float32Array(2 * 1 * 128), [2, 1, 128]),
+      sr: new ortRuntime.Tensor("int64", BigInt64Array.from([16000n]), []),
+    });
+    await smartSession.run({
+      input_features: new ortRuntime.Tensor("float32", new Float32Array(80 * SMART_INPUT_FRAMES), [1, 80, SMART_INPUT_FRAMES]),
+    });
+  }
+
+  function updateBackendText() {
+    els.backendText.textContent = `${state.inferenceBackend} / ${state.featureBackend}`;
+  }
+
   async function ensureModels() {
     if (state.modelsReady || state.loading) {
       return;
@@ -356,22 +560,14 @@
 
     state.loading = true;
     setUiState("Loading models");
-
-    ort.env.wasm.wasmPaths = "./vendor/";
-    ort.env.wasm.numThreads = 1;
-    ort.env.wasm.proxy = false;
-
-    const sessionOptions = {
-      executionProviders: ["wasm"],
-      graphOptimizationLevel: "all",
-    };
-    const vadSession = await ort.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
-    const smartSession = await ort.InferenceSession.create(MODEL_PATHS.smartTurn, sessionOptions);
-    state.vad = new SileroVAD(vadSession);
-    state.smartTurn = new SmartTurnPredictor(smartSession);
-    state.modelsReady = true;
-    state.loading = false;
-    setUiState("Ready");
+    try {
+      await ensureFeatureExtractor();
+      await ensureOrtRuntime();
+      state.modelsReady = true;
+      setUiState("Ready");
+    } finally {
+      state.loading = false;
+    }
   }
 
   async function start() {
@@ -407,10 +603,11 @@
       state.processor.connect(state.audioContext.destination);
 
       resetCaptureState();
+      resetRuntimeStats();
       state.running = true;
       els.stopButton.disabled = false;
       setUiState("Listening");
-      els.detailText.textContent = `Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz, local WASM CPU inference`;
+      els.detailText.textContent = `Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz, ${state.inferenceBackend} inference, ${state.featureBackend} features`;
     } catch (error) {
       stop();
       setUiState("Error");
@@ -502,7 +699,10 @@
     const rms = Math.sqrt(chunk.reduce((sum, v) => sum + v * v, 0) / chunk.length);
     pushLimited(state.waveformHistory, Math.min(1, rms * 16), 420);
 
+    const vadStarted = performance.now();
     const vadProb = await state.vad.probability(chunk);
+    const vadElapsed = performance.now() - vadStarted;
+    recordRuntime("vad", vadElapsed);
     state.lastVad = vadProb;
     els.vadText.textContent = vadProb.toFixed(2);
     pushLimited(state.vadHistory, vadProb, 420);
@@ -552,6 +752,9 @@
     try {
       const result = await state.smartTurn.predict(audio);
       const elapsed = performance.now() - started;
+      recordRuntime("smartTurn", elapsed);
+      recordRuntime("feature", result.timings.featureMs);
+      recordRuntime("onnx", result.timings.onnxMs);
       state.lastPrediction = result.prediction;
       state.lastProbability = result.probability;
       pushLimited(state.turnHistory, result.probability, 80);
@@ -578,7 +781,7 @@
     els.probabilityText.textContent = result.probability.toFixed(3);
     els.resultMetric.classList.toggle("complete", complete);
     els.resultMetric.classList.toggle("incomplete", !complete);
-    els.detailText.textContent = `Segment ${durationSec.toFixed(2)} s, inference ${elapsedMs.toFixed(1)} ms`;
+    els.detailText.textContent = `Segment ${durationSec.toFixed(2)} s, total ${elapsedMs.toFixed(1)} ms, feature ${result.timings.featureMs.toFixed(1)} ms, ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
     const li = document.createElement("li");
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -594,6 +797,22 @@
     if (list.length > maxLength) {
       list.splice(0, list.length - maxLength);
     }
+  }
+
+  function resetRuntimeStats() {
+    for (const [name, elementName] of Object.entries(timingOutputs)) {
+      state.timings[name].total = 0;
+      state.timings[name].count = 0;
+      els[elementName].textContent = "--";
+    }
+  }
+
+  function recordRuntime(name, elapsedMs) {
+    const timing = state.timings[name];
+    timing.total += elapsedMs;
+    timing.count += 1;
+    const averageMs = timing.total / timing.count;
+    els[timingOutputs[name]].textContent = `${averageMs.toFixed(1)} ms`;
   }
 
   function setUiState(label) {
