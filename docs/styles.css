@@ -1,0 +1,259 @@
+:root {
+  --bg: #f6f7f4;
+  --panel: #ffffff;
+  --ink: #202423;
+  --muted: #69706d;
+  --line: #d9dfda;
+  --wave: #237f8f;
+  --vad: #cf6d31;
+  --turn: #4f6f3d;
+  --danger: #b43d3d;
+  --shadow: 0 18px 42px rgba(32, 36, 35, 0.11);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button {
+  min-width: 104px;
+  min-height: 44px;
+  border: 1px solid #1f3b3f;
+  border-radius: 8px;
+  background: #203b40;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  border-color: var(--line);
+  background: #e1e5e1;
+  color: #8a918e;
+  cursor: default;
+}
+
+.app-shell {
+  width: min(1180px, calc(100% - 28px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2rem, 5vw, 4.1rem);
+  line-height: 0.95;
+}
+
+h2 {
+  font-size: 1rem;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.metric {
+  min-height: 86px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+  box-shadow: 0 8px 24px rgba(32, 36, 35, 0.06);
+}
+
+.metric-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.metric strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: clamp(1.08rem, 2.2vw, 1.55rem);
+  line-height: 1.1;
+}
+
+.result-metric.complete {
+  border-color: rgba(79, 111, 61, 0.45);
+  background: #f0f6ec;
+}
+
+.result-metric.incomplete {
+  border-color: rgba(180, 61, 61, 0.42);
+  background: #fbefef;
+}
+
+.graph-panel,
+.history-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.graph-panel {
+  padding: 16px;
+}
+
+.graph-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.graph-head p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend i {
+  width: 18px;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.legend .wave {
+  background: var(--wave);
+}
+
+.legend .vad {
+  background: var(--vad);
+}
+
+.legend .turn {
+  background: var(--turn);
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: min(58vh, 620px);
+  min-height: 360px;
+  border: 1px solid #e5e9e5;
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.history-panel {
+  margin-top: 12px;
+  padding: 16px;
+}
+
+.history-list {
+  display: grid;
+  gap: 8px;
+  max-height: 210px;
+  overflow: auto;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-list li {
+  display: grid;
+  grid-template-columns: 96px 1fr 92px 92px;
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid #e5e9e5;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.history-list strong {
+  color: var(--ink);
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    width: min(100% - 20px, 1180px);
+    padding-top: 18px;
+  }
+
+  .topbar,
+  .graph-head {
+    display: grid;
+  }
+
+  .controls,
+  .legend {
+    justify-content: flex-start;
+  }
+
+  .status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  canvas {
+    height: 420px;
+  }
+
+  .history-list li {
+    grid-template-columns: 76px 1fr;
+  }
+}

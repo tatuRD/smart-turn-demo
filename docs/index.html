@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Smart Turn Browser Demo</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="topbar" aria-label="Smart Turn controls">
+        <div>
+          <p class="eyebrow">Local ONNX inference</p>
+          <h1>Smart Turn Demo</h1>
+        </div>
+        <div class="controls">
+          <button id="startButton" type="button">Start</button>
+          <button id="stopButton" type="button" disabled>Stop</button>
+        </div>
+      </section>
+
+      <section class="status-grid" aria-label="Current status">
+        <div class="metric">
+          <span class="metric-label">State</span>
+          <strong id="stateText">Idle</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">VAD</span>
+          <strong id="vadText">0.00</strong>
+        </div>
+        <div class="metric result-metric">
+          <span class="metric-label">Smart Turn</span>
+          <strong id="predictionText">Waiting</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Complete probability</span>
+          <strong id="probabilityText">--</strong>
+        </div>
+      </section>
+
+      <section class="graph-panel" aria-label="Live graphs">
+        <div class="graph-head">
+          <div>
+            <h2>Live signal</h2>
+            <p id="detailText">マイクを許可して話すと、端末上だけでVADとSmart Turnを実行します。</p>
+          </div>
+          <div class="legend" aria-label="Graph legend">
+            <span><i class="wave"></i>Wave</span>
+            <span><i class="vad"></i>VAD</span>
+            <span><i class="turn"></i>Complete</span>
+          </div>
+        </div>
+        <canvas id="graphCanvas" width="1200" height="620"></canvas>
+      </section>
+
+      <section class="history-panel" aria-label="Prediction history">
+        <h2>Prediction history</h2>
+        <ol id="historyList" class="history-list"></ol>
+      </section>
+    </main>
+
+    <script src="./vendor/ort.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
