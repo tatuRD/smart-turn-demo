@@ -10,3 +10,7 @@ All inference runs locally in the browser:
 - When available, the demo dynamically loads Transformers.js for Whisper feature extraction and ONNX Runtime Web's WebGPU build from jsDelivr, then falls back to WASM if WebGPU is unavailable or cannot run the models.
 
 Use an HTTPS origin for microphone access. GitHub Pages satisfies this requirement.
+
+## Cache updates on GitHub Pages
+
+GitHub Pages can keep previously loaded HTML and assets briefly cached. `index.html` loads CSS and JavaScript with a `?v=` value generated from the current Unix time, so those assets are revalidated on each page load. When the HTML structure or model files change, update the `app-version` meta value in `index.html`; the page checks the latest `index.html` with `cache: "no-store"` and reloads with a versioned URL when it detects a newer version.

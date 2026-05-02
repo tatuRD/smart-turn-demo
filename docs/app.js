@@ -12,10 +12,11 @@
   const SMART_INPUT_FRAMES = SMART_INPUT_SAMPLES / 160;
   const ORT_WEBGPU_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/ort.webgpu.min.mjs";
   const ORT_WEBGPU_WASM_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/";
+  const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
 
   const MODEL_PATHS = {
-    vad: "./models/silero_vad.onnx",
-    smartTurn: "./models/smart-turn-v3.2-cpu.onnx",
+    vad: withAssetVersion("./models/silero_vad.onnx"),
+    smartTurn: withAssetVersion("./models/smart-turn-v3.2-cpu.onnx"),
   };
 
   let ort = window.ort;
@@ -85,6 +86,48 @@
   const preChunks = Math.ceil(PRE_SPEECH_MS / chunkMs);
   const stopChunks = Math.ceil(STOP_MS / chunkMs);
   const maxChunks = Math.ceil(MAX_DURATION_SECONDS / (CHUNK / RATE));
+
+  checkForPageUpdate();
+
+  function withAssetVersion(path) {
+    if (APP_VERSION === "dev") {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}v=${encodeURIComponent(APP_VERSION)}`;
+  }
+
+  async function checkForPageUpdate() {
+    if (APP_VERSION === "dev" || location.protocol === "file:") {
+      return;
+    }
+
+    try {
+      const response = await fetch(withCacheBust("./index.html"), { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const html = await response.text();
+      const latestVersion = parseAppVersion(html);
+      if (latestVersion && latestVersion !== APP_VERSION) {
+        const url = new URL(location.href);
+        url.searchParams.set("v", latestVersion);
+        location.replace(url.toString());
+      }
+    } catch (error) {
+      console.warn("Could not check for page update.", error);
+    }
+  }
+
+  function withCacheBust(path) {
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}t=${Date.now()}`;
+  }
+
+  function parseAppVersion(html) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return doc.querySelector('meta[name="app-version"]')?.content || "";
+  }
 
   class SileroVAD {
     constructor(session) {
