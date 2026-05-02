@@ -31,7 +31,6 @@
     vadAvgText: document.getElementById("vadAvgText"),
     smartTurnAvgText: document.getElementById("smartTurnAvgText"),
     featureAvgText: document.getElementById("featureAvgText"),
-    onnxAvgText: document.getElementById("onnxAvgText"),
     backendText: document.getElementById("backendText"),
     detailText: document.getElementById("detailText"),
     graphCanvas: document.getElementById("graphCanvas"),
@@ -64,6 +63,7 @@
     lastPrediction: null,
     lastProbability: null,
     inferenceBusy: false,
+    uiState: "Idle",
     waveformHistory: [],
     vadHistory: [],
     turnHistory: [],
@@ -71,7 +71,6 @@
       vad: { total: 0, count: 0 },
       smartTurn: { total: 0, count: 0 },
       feature: { total: 0, count: 0 },
-      onnx: { total: 0, count: 0 },
     },
   };
 
@@ -79,7 +78,6 @@
     vad: "vadAvgText",
     smartTurn: "smartTurnAvgText",
     feature: "featureAvgText",
-    onnx: "onnxAvgText",
   };
 
   const chunkMs = (CHUNK / RATE) * 1000;
@@ -577,7 +575,7 @@
     }
     state.vad = new SileroVAD(vadSession);
     state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor);
-    state.inferenceBackend = backend.toUpperCase();
+    state.inferenceBackend = backend === "webgpu" ? "WebGPU" : "Wasm";
     updateBackendText();
   }
 
@@ -593,7 +591,7 @@
   }
 
   function updateBackendText() {
-    els.backendText.textContent = `${state.inferenceBackend} / ${state.featureBackend}`;
+    els.backendText.textContent = state.inferenceBackend;
   }
 
   async function ensureModels() {
@@ -650,7 +648,7 @@
       state.running = true;
       els.stopButton.disabled = false;
       setUiState("Listening");
-      els.detailText.textContent = `Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz, ${state.inferenceBackend} inference, ${state.featureBackend} features`;
+      els.detailText.textContent = `${state.uiState} | Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz | Backend ${state.inferenceBackend} | Features ${state.featureBackend}`;
     } catch (error) {
       stop();
       setUiState("Error");
@@ -747,7 +745,9 @@
     const vadElapsed = performance.now() - vadStarted;
     recordRuntime("vad", vadElapsed);
     state.lastVad = vadProb;
-    els.vadText.textContent = vadProb.toFixed(2);
+    if (els.vadText) {
+      els.vadText.textContent = vadProb.toFixed(2);
+    }
     pushLimited(state.vadHistory, vadProb, 420);
 
     const isSpeech = vadProb > VAD_THRESHOLD;
@@ -795,9 +795,8 @@
     try {
       const result = await state.smartTurn.predict(audio);
       const elapsed = performance.now() - started;
-      recordRuntime("smartTurn", elapsed);
+      recordRuntime("smartTurn", result.timings.onnxMs);
       recordRuntime("feature", result.timings.featureMs);
-      recordRuntime("onnx", result.timings.onnxMs);
       state.lastPrediction = result.prediction;
       state.lastProbability = result.probability;
       pushLimited(state.turnHistory, result.probability, 80);
@@ -820,11 +819,17 @@
 
   function renderPrediction(result, durationSec, elapsedMs) {
     const complete = result.prediction === 1;
-    els.predictionText.textContent = complete ? "Complete" : "Incomplete";
-    els.probabilityText.textContent = result.probability.toFixed(3);
-    els.resultMetric.classList.toggle("complete", complete);
-    els.resultMetric.classList.toggle("incomplete", !complete);
-    els.detailText.textContent = `Segment ${durationSec.toFixed(2)} s, total ${elapsedMs.toFixed(1)} ms, feature ${result.timings.featureMs.toFixed(1)} ms, ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
+    if (els.predictionText) {
+      els.predictionText.textContent = complete ? "Complete" : "Incomplete";
+    }
+    if (els.probabilityText) {
+      els.probabilityText.textContent = result.probability.toFixed(3);
+    }
+    if (els.resultMetric) {
+      els.resultMetric.classList.toggle("complete", complete);
+      els.resultMetric.classList.toggle("incomplete", !complete);
+    }
+    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Segment ${durationSec.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
     const li = document.createElement("li");
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -859,7 +864,10 @@
   }
 
   function setUiState(label) {
-    els.stateText.textContent = label;
+    state.uiState = label;
+    if (els.stateText) {
+      els.stateText.textContent = label;
+    }
   }
 
   function drawGraph() {
