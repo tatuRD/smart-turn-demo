@@ -10,6 +10,10 @@
   const MODEL_RESET_STATES_TIME = 5000;
   const SMART_INPUT_SAMPLES = RATE * MAX_DURATION_SECONDS;
   const SMART_INPUT_FRAMES = SMART_INPUT_SAMPLES / 160;
+  const FEATURE_EXTRACT_YIELD_EVERY_FRAMES = 32;
+  const WAVEFORM_HISTORY_LENGTH = 420;
+  const VAD_HISTORY_LENGTH = 420;
+  const TURN_HISTORY_LENGTH = 420;
   const ORT_WEBGPU_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/ort.webgpu.min.mjs";
   const ORT_WEBGPU_WASM_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/";
   const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
@@ -64,14 +68,15 @@
     speechActive: false,
     preBuffer: [],
     segment: [],
+    recentAudioChunks: [],
     lastVad: 0,
     lastPrediction: null,
     lastProbability: null,
     inferenceBusy: false,
     uiState: "Idle",
-    waveformHistory: [],
-    vadHistory: [],
-    turnHistory: [],
+    waveformHistory: createZeroHistory(WAVEFORM_HISTORY_LENGTH),
+    vadHistory: createZeroHistory(VAD_HISTORY_LENGTH),
+    turnHistory: createZeroHistory(TURN_HISTORY_LENGTH),
     timings: {
       vad: { total: 0, count: 0 },
       smartTurn: { total: 0, count: 0 },
@@ -227,8 +232,8 @@
 
     async predict(audio) {
       const featureStarted = performance.now();
-      const features = await this.extractor.extract(audio);
-      const featureMs = performance.now() - featureStarted;
+      const { features, yieldWaitMs } = await this.extractor.extract(audio);
+      const featureMs = Math.max(0, performance.now() - featureStarted - yieldWaitMs);
       const input = new ort.Tensor("float32", features, [1, 80, 800]);
 
       const onnxStarted = performance.now();
@@ -258,16 +263,20 @@
       this.melFilters = makeMelFilters(RATE, this.nFft, this.nMels);
     }
 
-    extract(audio) {
+    async extract(audio) {
       const samples = normalizePaddedAudio(audio, SMART_INPUT_SAMPLES);
       const padded = reflectPad(samples, this.nFft / 2);
       const frameCount = Math.floor((padded.length - this.nFft) / this.hopLength) + 1;
       const frameLimit = Math.min(frameCount - 1, this.nFrames);
       const mel = new Float32Array(this.nMels * this.nFrames);
       const power = new Float32Array(this.nFft / 2 + 1);
+      let yieldWaitMs = 0;
       let globalMax = -Infinity;
 
       for (let frame = 0; frame < frameLimit; frame += 1) {
+        if (frame > 0 && frame % FEATURE_EXTRACT_YIELD_EVERY_FRAMES === 0) {
+          yieldWaitMs += await yieldToMainThread();
+        }
         const start = frame * this.hopLength;
         powerSpectrumInto(power, padded, start, this.window, this.fftPlan);
         for (let m = 0; m < this.nMels; m += 1) {
@@ -288,9 +297,15 @@
 
       const floor = globalMax - 8;
       for (let i = 0; i < mel.length; i += 1) {
+        if (i > 0 && i % (this.nFrames * 8) === 0) {
+          yieldWaitMs += await yieldToMainThread();
+        }
         mel[i] = (Math.max(mel[i], floor) + 4) / 4;
       }
-      return mel;
+      return {
+        features: mel,
+        yieldWaitMs,
+      };
     }
   }
 
@@ -661,6 +676,7 @@
       state.processor.connect(state.audioContext.destination);
 
       resetCaptureState();
+      resetRecentAudioState();
       resetRuntimeStats();
       resetGraphHistory();
       state.running = true;
@@ -702,6 +718,7 @@
     state.vadQueue = [];
     state.vadBusy = false;
     resetCaptureState();
+    resetRecentAudioState();
     els.startButton.disabled = false;
     els.stopButton.disabled = true;
     setThresholdControlsDisabled(false);
@@ -717,18 +734,14 @@
     }
   }
 
-  function resetGraphHistory() {
-    state.waveformHistory = [];
-    state.vadHistory = [];
-    state.turnHistory = [];
+  function resetRecentAudioState() {
+    state.recentAudioChunks = [];
   }
 
-  function clearAudioBuffers() {
-    state.vadQueue = [];
-    resetCaptureState();
-    if (state.resampler) {
-      state.resampler.reset();
-    }
+  function resetGraphHistory() {
+    state.waveformHistory = createZeroHistory(WAVEFORM_HISTORY_LENGTH);
+    state.vadHistory = createZeroHistory(VAD_HISTORY_LENGTH);
+    state.turnHistory = createZeroHistory(TURN_HISTORY_LENGTH);
   }
 
   function onAudioProcess(event) {
@@ -771,7 +784,8 @@
 
   async function processChunk(chunk) {
     const rms = Math.sqrt(chunk.reduce((sum, v) => sum + v * v, 0) / chunk.length);
-    pushLimited(state.waveformHistory, Math.min(1, rms * 16), 420);
+    pushLimited(state.waveformHistory, Math.min(1, rms * 16), WAVEFORM_HISTORY_LENGTH);
+    pushRecentAudioChunk(chunk);
 
     const vadStarted = performance.now();
     const vadProb = await state.vad.probability(chunk);
@@ -781,7 +795,8 @@
     if (els.vadText) {
       els.vadText.textContent = vadProb.toFixed(2);
     }
-    pushLimited(state.vadHistory, vadProb, 420);
+    pushLimited(state.vadHistory, vadProb, VAD_HISTORY_LENGTH);
+    pushLimited(state.turnHistory, 0, TURN_HISTORY_LENGTH);
 
     const isSpeech = vadProb >= state.vadThreshold;
     if (!state.speechActive) {
@@ -804,17 +819,19 @@
 
     if (!isSpeech) {
       const rawSegment = concatenateChunks(state.segment);
-      const segment = prepareSmartTurnAudio(rawSegment);
-      const capturedDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
+      const recentAudio = concatenateChunks(state.recentAudioChunks);
+      const smartTurnInput = prepareSmartTurnAudio(recentAudio);
+      const speechDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
+      const recentDurationSec = Math.min(recentAudio.length, SMART_INPUT_SAMPLES) / RATE;
       resetCaptureState();
-      await processSegment(segment, capturedDurationSec);
+      await processSegment(smartTurnInput, speechDurationSec, recentDurationSec);
       if (state.running) {
         setUiState("Listening");
       }
     }
   }
 
-  async function processSegment(audio, capturedDurationSec = audio.length / RATE) {
+  async function processSegment(audio, speechDurationSec = audio.length / RATE, recentDurationSec = audio.length / RATE) {
     if (!audio.length || state.inferenceBusy) {
       return;
     }
@@ -822,6 +839,7 @@
     setUiState("Predicting");
     const started = performance.now();
     try {
+      await yieldToMainThread();
       const result = await state.smartTurn.predict(audio);
       result.prediction = result.probability >= state.turnThreshold ? 1 : 0;
       const elapsed = performance.now() - started;
@@ -829,11 +847,8 @@
       recordRuntime("feature", result.timings.featureMs);
       state.lastPrediction = result.prediction;
       state.lastProbability = result.probability;
-      pushLimited(state.turnHistory, result.probability, 80);
-      renderPrediction(result, capturedDurationSec, elapsed);
-      if (result.prediction === 1) {
-        clearAudioBuffers();
-      }
+      stampLatestHistoryValue(state.turnHistory, result.probability);
+      renderPrediction(result, speechDurationSec, recentDurationSec, elapsed);
     } finally {
       state.inferenceBusy = false;
     }
@@ -860,7 +875,14 @@
     return out;
   }
 
-  function renderPrediction(result, durationSec, elapsedMs) {
+  function pushRecentAudioChunk(chunk) {
+    state.recentAudioChunks.push(chunk);
+    while (state.recentAudioChunks.length > smartInputChunks) {
+      state.recentAudioChunks.shift();
+    }
+  }
+
+  function renderPrediction(result, speechDurationSec, recentDurationSec, elapsedMs) {
     const complete = result.prediction === 1;
     if (els.predictionText) {
       els.predictionText.textContent = complete ? "Complete" : "Incomplete";
@@ -872,12 +894,12 @@
       els.resultMetric.classList.toggle("complete", complete);
       els.resultMetric.classList.toggle("incomplete", !complete);
     }
-    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Segment ${durationSec.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
+    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Speech ${speechDurationSec.toFixed(2)} s | Recent ${recentDurationSec.toFixed(2)} s | Window ${MAX_DURATION_SECONDS.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
     if (els.historyList) {
       const li = document.createElement("li");
       const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      li.innerHTML = `<span>${time}</span><strong>${complete ? "Complete" : "Incomplete"}</strong><span>${result.probability.toFixed(3)}</span><span>${durationSec.toFixed(2)} s</span>`;
+      li.innerHTML = `<span>${time}</span><strong>${complete ? "Complete" : "Incomplete"}</strong><span>${result.probability.toFixed(3)}</span><span>${recentDurationSec.toFixed(2)} s</span>`;
       els.historyList.prepend(li);
       while (els.historyList.children.length > 20) {
         els.historyList.lastElementChild.remove();
@@ -890,6 +912,35 @@
     if (list.length > maxLength) {
       list.splice(0, list.length - maxLength);
     }
+  }
+
+  function stampLatestHistoryValue(list, value) {
+    const normalizedValue = clamp01(value);
+    if (!list.length) {
+      list.push(normalizedValue);
+      return;
+    }
+
+    const lastIndex = list.length - 1;
+    if (list[lastIndex] === 0) {
+      list[lastIndex] = normalizedValue;
+      return;
+    }
+
+    pushLimited(list, normalizedValue, TURN_HISTORY_LENGTH);
+  }
+
+  function yieldToMainThread() {
+    return new Promise((resolve) => {
+      const started = performance.now();
+      window.setTimeout(() => {
+        resolve(performance.now() - started);
+      }, 0);
+    });
+  }
+
+  function createZeroHistory(length) {
+    return Array(length).fill(0);
   }
 
   function resetRuntimeStats() {
