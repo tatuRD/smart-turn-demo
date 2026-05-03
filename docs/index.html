@@ -38,6 +38,11 @@
           <strong id="turnThresholdText">0.80</strong>
           <input id="turnThresholdSlider" type="range" min="0" max="1" step="0.01" value="0.8" aria-describedby="turnThresholdText">
         </div>
+        <div class="metric threshold-metric delay-metric">
+          <label class="metric-label" for="postSpeechSlider">Smart Turn delay</label>
+          <strong id="postSpeechText">200 ms</strong>
+          <input id="postSpeechSlider" type="range" min="0" max="300" step="10" value="200" aria-describedby="postSpeechText">
+        </div>
         <div class="metric">
           <span class="metric-label">SileroVAD avg</span>
           <strong id="vadAvgText">--</strong>
@@ -69,7 +74,8 @@
           <ul class="algorithm-list">
             <li><strong>VAD threshold</strong>: VAD probability がこの値以上なら ON、下回ると OFF とみなします。</li>
             <li><strong>Turn-taking threshold</strong>: Smart Turn の出力確率がこの値以上ならターンテイキング <code>True</code>、未満なら <code>False</code> と判定します。</li>
-            <li><strong>Smart Turn 入力音声</strong>: マイクのモノラル音声を 16 kHz にリサンプリングして最大 8 秒ぶん保持し、発話終了後 200 ms で直近 8 秒を切り出して使います。短い場合は先頭をゼロ埋めし、その後 Whisper 互換の 80 x 800 log-Mel 特徴量に変換して推論します。出力確率がしきい値を超えて <code>True</code> になった場合は音声バッファを空にするため、同じ区間は次回の入力に含まれません。</li>
+            <li><strong>Smart Turn delay</strong>: 発話が終わったと判定されてから Smart Turn を実行するまでの待ち時間です。0 ms から 300 ms まで 10 ms 刻みで調整できます。実行中は変更できず、停止中に設定した値が次回の実行から使われます。</li>
+            <li><strong>Smart Turn 入力音声</strong>: マイクのモノラル音声を 16 kHz にリサンプリングして最大 8 秒ぶん保持し、発話終了後に直近 8 秒を切り出して使います。短い場合は先頭をゼロ埋めし、その後 Whisper 互換の 80 x 800 log-Mel 特徴量に変換して推論します。出力確率がしきい値を超えて <code>True</code> になった場合は音声バッファを空にするため、同じ区間は次回の入力に含まれません。</li>
           </ul>
         </section>
       </section>

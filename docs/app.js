@@ -5,7 +5,7 @@
   const CHUNK = 512;
   const INITIAL_VAD_THRESHOLD = 0.2;
   const INITIAL_TURN_THRESHOLD = 0.8;
-  const POST_SPEECH_MS = 200;
+  const INITIAL_POST_SPEECH_MS = 200;
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
   const SMART_INPUT_SAMPLES = RATE * MAX_DURATION_SECONDS;
@@ -38,6 +38,9 @@
     vadThresholdText: document.getElementById("vadThresholdText"),
     turnThresholdSlider: document.getElementById("turnThresholdSlider"),
     turnThresholdText: document.getElementById("turnThresholdText"),
+    postSpeechSlider: document.getElementById("postSpeechSlider"),
+    postSpeechText: document.getElementById("postSpeechText"),
+    postSpeechDescription: document.getElementById("postSpeechDescription"),
     smartTurnAvgText: document.getElementById("smartTurnAvgText"),
     featureAvgText: document.getElementById("featureAvgText"),
     backendText: document.getElementById("backendText"),
@@ -65,6 +68,7 @@
     vadBusy: false,
     vadThreshold: INITIAL_VAD_THRESHOLD,
     turnThreshold: INITIAL_TURN_THRESHOLD,
+    postSpeechMs: INITIAL_POST_SPEECH_MS,
     speechActive: false,
     pendingTurnTimeoutId: null,
     recentAudioChunks: [],
@@ -820,10 +824,15 @@
     }
 
     if (!state.pendingTurnTimeoutId) {
-      state.pendingTurnTimeoutId = window.setTimeout(() => {
-        void finalizePendingTurn();
-      }, POST_SPEECH_MS);
+      schedulePendingTurnTimeout(state.postSpeechMs);
     }
+  }
+
+  function schedulePendingTurnTimeout(delayMs) {
+    clearPendingTurnTimeout();
+    state.pendingTurnTimeoutId = window.setTimeout(() => {
+      void finalizePendingTurn();
+    }, delayMs);
   }
 
   function clearPendingTurnTimeout() {
@@ -1149,12 +1158,30 @@
     }
   }
 
+  function setPostSpeechMs(value) {
+    const numericValue = Number(value);
+    const clampedValue = Number.isFinite(numericValue)
+      ? Math.max(0, Math.min(300, numericValue))
+      : INITIAL_POST_SPEECH_MS;
+    state.postSpeechMs = Math.round(clampedValue / 10) * 10;
+    const label = `${state.postSpeechMs} ms`;
+    if (els.postSpeechText) {
+      els.postSpeechText.textContent = label;
+    }
+    if (els.postSpeechDescription) {
+      els.postSpeechDescription.textContent = label;
+    }
+  }
+
   function setThresholdControlsDisabled(disabled) {
     if (els.vadThresholdSlider) {
       els.vadThresholdSlider.disabled = disabled;
     }
     if (els.turnThresholdSlider) {
       els.turnThresholdSlider.disabled = disabled;
+    }
+    if (els.postSpeechSlider) {
+      els.postSpeechSlider.disabled = disabled;
     }
   }
 
@@ -1170,6 +1197,12 @@
     setTurnThreshold(els.turnThresholdSlider.value);
     els.turnThresholdSlider.addEventListener("input", (event) => {
       setTurnThreshold(event.target.value);
+    });
+  }
+  if (els.postSpeechSlider) {
+    setPostSpeechMs(els.postSpeechSlider.value);
+    els.postSpeechSlider.addEventListener("input", (event) => {
+      setPostSpeechMs(event.target.value);
     });
   }
   requestAnimationFrame(drawGraph);

@@ -131,6 +131,10 @@ h2 {
   accent-color: var(--turn);
 }
 
+.delay-metric input {
+  accent-color: #3c5ccf;
+}
+
 .result-metric.complete {
   border-color: rgba(79, 111, 61, 0.45);
   background: #f0f6ec;
