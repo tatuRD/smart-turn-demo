@@ -3,9 +3,8 @@
 
   const RATE = 16000;
   const CHUNK = 512;
-  const VAD_THRESHOLD = 0.5;
+  const INITIAL_VAD_THRESHOLD = 0.2;
   const PRE_SPEECH_MS = 200;
-  const STOP_MS = 1000;
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
   const SMART_INPUT_SAMPLES = RATE * MAX_DURATION_SECONDS;
@@ -30,6 +29,8 @@
     predictionText: document.getElementById("predictionText"),
     probabilityText: document.getElementById("probabilityText"),
     vadAvgText: document.getElementById("vadAvgText"),
+    vadThresholdSlider: document.getElementById("vadThresholdSlider"),
+    vadThresholdText: document.getElementById("vadThresholdText"),
     smartTurnAvgText: document.getElementById("smartTurnAvgText"),
     featureAvgText: document.getElementById("featureAvgText"),
     backendText: document.getElementById("backendText"),
@@ -55,11 +56,10 @@
     featureBackend: "--",
     vadQueue: [],
     vadBusy: false,
+    vadThreshold: INITIAL_VAD_THRESHOLD,
     speechActive: false,
     preBuffer: [],
     segment: [],
-    trailingSilence: 0,
-    sinceTriggerChunks: 0,
     lastVad: 0,
     lastPrediction: null,
     lastProbability: null,
@@ -83,8 +83,7 @@
 
   const chunkMs = (CHUNK / RATE) * 1000;
   const preChunks = Math.ceil(PRE_SPEECH_MS / chunkMs);
-  const stopChunks = Math.ceil(STOP_MS / chunkMs);
-  const maxChunks = Math.ceil(MAX_DURATION_SECONDS / (CHUNK / RATE));
+  const smartInputChunks = Math.ceil(SMART_INPUT_SAMPLES / CHUNK);
 
   checkForPageUpdate();
 
@@ -655,7 +654,9 @@
 
       resetCaptureState();
       resetRuntimeStats();
+      resetGraphHistory();
       state.running = true;
+      setVadThresholdControlDisabled(true);
       els.stopButton.disabled = false;
       setUiState("Listening");
       els.detailText.textContent = `${state.uiState} | Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz | Backend ${state.inferenceBackend} | Features ${state.featureBackend}`;
@@ -664,6 +665,7 @@
       setUiState("Error");
       els.detailText.textContent = error.message || String(error);
       els.startButton.disabled = false;
+      setVadThresholdControlDisabled(false);
     }
   }
 
@@ -694,6 +696,7 @@
     resetCaptureState();
     els.startButton.disabled = false;
     els.stopButton.disabled = true;
+    setVadThresholdControlDisabled(false);
     setUiState(state.modelsReady ? "Ready" : "Idle");
   }
 
@@ -701,11 +704,15 @@
     state.speechActive = false;
     state.preBuffer = [];
     state.segment = [];
-    state.trailingSilence = 0;
-    state.sinceTriggerChunks = 0;
     if (state.vad) {
       state.vad.reset();
     }
+  }
+
+  function resetGraphHistory() {
+    state.waveformHistory = [];
+    state.vadHistory = [];
+    state.turnHistory = [];
   }
 
   function onAudioProcess(event) {
@@ -760,7 +767,7 @@
     }
     pushLimited(state.vadHistory, vadProb, 420);
 
-    const isSpeech = vadProb > VAD_THRESHOLD;
+    const isSpeech = vadProb >= state.vadThreshold;
     if (!state.speechActive) {
       state.preBuffer.push(chunk);
       if (state.preBuffer.length > preChunks) {
@@ -768,34 +775,30 @@
       }
       if (isSpeech) {
         state.segment = state.preBuffer.slice();
-        state.segment.push(chunk);
         state.speechActive = true;
-        state.trailingSilence = 0;
-        state.sinceTriggerChunks = 1;
         setUiState("Recording speech");
       }
       return;
     }
 
     state.segment.push(chunk);
-    state.sinceTriggerChunks += 1;
-    if (isSpeech) {
-      state.trailingSilence = 0;
-    } else {
-      state.trailingSilence += 1;
+    while (state.segment.length > smartInputChunks) {
+      state.segment.shift();
     }
 
-    if (state.trailingSilence >= stopChunks || state.sinceTriggerChunks >= maxChunks) {
-      const segment = concatenateChunks(state.segment);
+    if (!isSpeech) {
+      const rawSegment = concatenateChunks(state.segment);
+      const segment = prepareSmartTurnAudio(rawSegment);
+      const capturedDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
       resetCaptureState();
-      await processSegment(segment);
+      await processSegment(segment, capturedDurationSec);
       if (state.running) {
         setUiState("Listening");
       }
     }
   }
 
-  async function processSegment(audio) {
+  async function processSegment(audio, capturedDurationSec = audio.length / RATE) {
     if (!audio.length || state.inferenceBusy) {
       return;
     }
@@ -810,10 +813,20 @@
       state.lastPrediction = result.prediction;
       state.lastProbability = result.probability;
       pushLimited(state.turnHistory, result.probability, 80);
-      renderPrediction(result, audio.length / RATE, elapsed);
+      renderPrediction(result, capturedDurationSec, elapsed);
     } finally {
       state.inferenceBusy = false;
     }
+  }
+
+  function prepareSmartTurnAudio(audio) {
+    const input = new Float32Array(SMART_INPUT_SAMPLES);
+    if (audio.length >= SMART_INPUT_SAMPLES) {
+      input.set(audio.subarray(audio.length - SMART_INPUT_SAMPLES));
+    } else {
+      input.set(audio, SMART_INPUT_SAMPLES - audio.length);
+    }
+    return input;
   }
 
   function concatenateChunks(chunks) {
@@ -901,30 +914,39 @@
     const pad = 36 * dpr;
     const gap = 18 * dpr;
     const laneH = (height - pad * 2 - gap * 2) / 3;
-    drawLane(ctx, pad, pad, width - pad * 2, laneH, "Wave RMS", state.waveformHistory, "#237f8f", 0.5);
-    drawLane(ctx, pad, pad + laneH + gap, width - pad * 2, laneH, "VAD probability", state.vadHistory, "#cf6d31", VAD_THRESHOLD);
-    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Complete probability", state.turnHistory, "#4f6f3d", 0.5, true);
+    drawLane(ctx, pad, pad, width - pad * 2, laneH, "Wave RMS", state.waveformHistory, "#237f8f");
+    drawLane(ctx, pad, pad + laneH + gap, width - pad * 2, laneH, "VAD probability", state.vadHistory, "#cf6d31", state.vadThreshold);
+    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Turn-taking probability", state.turnHistory, "#4f6f3d", null, true);
 
     requestAnimationFrame(drawGraph);
   }
 
-  function drawLane(ctx, x, y, w, h, label, values, color, threshold, bars = false) {
+  function drawLane(ctx, x, y, w, h, label, values, color, threshold = null, bars = false) {
     ctx.save();
-    ctx.strokeStyle = "#dfe5df";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, w, h);
-    ctx.fillStyle = "#69706d";
-    ctx.font = `${12 * (window.devicePixelRatio || 1)}px system-ui, sans-serif`;
-    ctx.fillText(label, x + 10, y + 18);
+    const dpr = window.devicePixelRatio || 1;
+    const labelFontSize = 12 * dpr;
+    const labelGap = 8 * dpr;
+    const plotY = y + labelFontSize + labelGap;
+    const plotH = Math.max(1, h - labelFontSize - labelGap);
 
-    const thresholdY = y + h - h * threshold;
-    ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = "rgba(32,36,35,0.3)";
-    ctx.beginPath();
-    ctx.moveTo(x, thresholdY);
-    ctx.lineTo(x + w, thresholdY);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.fillStyle = "#2c312f";
+    ctx.font = `${labelFontSize}px system-ui, sans-serif`;
+    ctx.fillText(label, x + 2, y + labelFontSize);
+
+    ctx.strokeStyle = "#1b1f1d";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, plotY, w, plotH);
+
+    if (threshold !== null) {
+      const thresholdY = plotY + plotH - plotH * threshold;
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = "rgba(27,31,29,0.55)";
+      ctx.beginPath();
+      ctx.moveTo(x, thresholdY);
+      ctx.lineTo(x + w, thresholdY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     if (values.length > 0) {
       ctx.strokeStyle = color;
@@ -933,15 +955,15 @@
       if (bars) {
         const step = w / Math.max(values.length, 12);
         values.forEach((value, index) => {
-          const barH = Math.max(2, h * clamp01(value));
+          const barH = Math.max(2, plotH * clamp01(value));
           const bx = x + index * step;
-          ctx.fillRect(bx + 2, y + h - barH, Math.max(3, step - 4), barH);
+          ctx.fillRect(bx + 2, plotY + plotH - barH, Math.max(3, step - 4), barH);
         });
       } else {
         ctx.beginPath();
         values.forEach((value, index) => {
           const px = x + (index / Math.max(1, values.length - 1)) * w;
-          const py = y + h - h * clamp01(value);
+          const py = plotY + plotH - plotH * clamp01(value);
           if (index === 0) {
             ctx.moveTo(px, py);
           } else {
@@ -959,7 +981,26 @@
     return Math.max(0, Math.min(1, value));
   }
 
+  function setVadThreshold(value) {
+    state.vadThreshold = clamp01(Number(value));
+    if (els.vadThresholdText) {
+      els.vadThresholdText.textContent = state.vadThreshold.toFixed(2);
+    }
+  }
+
+  function setVadThresholdControlDisabled(disabled) {
+    if (els.vadThresholdSlider) {
+      els.vadThresholdSlider.disabled = disabled;
+    }
+  }
+
   els.startButton.addEventListener("click", start);
   els.stopButton.addEventListener("click", stop);
+  if (els.vadThresholdSlider) {
+    setVadThreshold(els.vadThresholdSlider.value);
+    els.vadThresholdSlider.addEventListener("input", (event) => {
+      setVadThreshold(event.target.value);
+    });
+  }
   requestAnimationFrame(drawGraph);
 })();

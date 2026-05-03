@@ -28,6 +28,11 @@
       </section>
 
       <section class="status-grid" aria-label="Current status">
+        <div class="metric threshold-metric">
+          <label class="metric-label" for="vadThresholdSlider">VAD ON/OFF threshold</label>
+          <strong id="vadThresholdText">0.20</strong>
+          <input id="vadThresholdSlider" type="range" min="0" max="1" step="0.01" value="0.2" aria-describedby="vadThresholdText">
+        </div>
         <div class="metric">
           <span class="metric-label">SileroVAD avg</span>
           <strong id="vadAvgText">--</strong>
@@ -51,11 +56,6 @@
           <div>
             <h2>Live signal</h2>
             <p id="detailText">マイクを許可して話すと、端末上だけでVADとSmart Turnを実行します。</p>
-          </div>
-          <div class="legend" aria-label="Graph legend">
-            <span><i class="wave"></i>Wave</span>
-            <span><i class="vad"></i>VAD</span>
-            <span><i class="turn"></i>Complete</span>
           </div>
         </div>
         <canvas id="graphCanvas" width="1200" height="620"></canvas>

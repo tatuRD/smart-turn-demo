@@ -117,6 +117,11 @@ h2 {
   line-height: 1.1;
 }
 
+.threshold-metric input {
+  width: 100%;
+  accent-color: var(--vad);
+}
+
 .result-metric.complete {
   border-color: rgba(79, 111, 61, 0.45);
   background: #f0f6ec;
@@ -151,40 +156,6 @@ h2 {
   margin-top: 4px;
   color: var(--muted);
   font-size: 0.92rem;
-}
-
-.legend {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-weight: 700;
-}
-
-.legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.legend i {
-  width: 18px;
-  height: 4px;
-  border-radius: 999px;
-}
-
-.legend .wave {
-  background: var(--wave);
-}
-
-.legend .vad {
-  background: var(--vad);
-}
-
-.legend .turn {
-  background: var(--turn);
 }
 
 canvas {
@@ -240,8 +211,7 @@ canvas {
     display: grid;
   }
 
-  .controls,
-  .legend {
+  .controls {
     justify-content: flex-start;
   }
 
