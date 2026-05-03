@@ -6,6 +6,7 @@
   const INITIAL_VAD_THRESHOLD = 0.2;
   const INITIAL_TURN_THRESHOLD = 0.8;
   const PRE_SPEECH_MS = 200;
+  const POST_SPEECH_MS = 200;
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
   const SMART_INPUT_SAMPLES = RATE * MAX_DURATION_SECONDS;
@@ -66,6 +67,7 @@
     vadThreshold: INITIAL_VAD_THRESHOLD,
     turnThreshold: INITIAL_TURN_THRESHOLD,
     speechActive: false,
+    pendingTurnTimeoutId: null,
     preBuffer: [],
     segment: [],
     recentAudioChunks: [],
@@ -73,6 +75,7 @@
     lastPrediction: null,
     lastProbability: null,
     inferenceBusy: false,
+    segmentProcessingPromise: null,
     uiState: "Idle",
     waveformHistory: createZeroHistory(WAVEFORM_HISTORY_LENGTH),
     vadHistory: createZeroHistory(VAD_HISTORY_LENGTH),
@@ -726,6 +729,7 @@
   }
 
   function resetCaptureState() {
+    clearPendingTurnTimeout();
     state.speechActive = false;
     state.preBuffer = [];
     state.segment = [];
@@ -768,7 +772,14 @@
   async function drainVadQueue() {
     state.vadBusy = true;
     try {
-      while (state.running && state.vadQueue.length >= CHUNK) {
+      while (state.running) {
+        if (state.segmentProcessingPromise) {
+          await state.segmentProcessingPromise;
+          continue;
+        }
+        if (state.vadQueue.length < CHUNK) {
+          break;
+        }
         const chunk = Float32Array.from(state.vadQueue.slice(0, CHUNK));
         state.vadQueue.splice(0, CHUNK);
         await processChunk(chunk);
@@ -817,16 +828,59 @@
       state.segment.shift();
     }
 
-    if (!isSpeech) {
-      const rawSegment = concatenateChunks(state.segment);
-      const recentAudio = concatenateChunks(state.recentAudioChunks);
-      const smartTurnInput = prepareSmartTurnAudio(recentAudio);
-      const speechDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
-      const recentDurationSec = Math.min(recentAudio.length, SMART_INPUT_SAMPLES) / RATE;
-      resetCaptureState();
-      await processSegment(smartTurnInput, speechDurationSec, recentDurationSec);
-      if (state.running) {
-        setUiState("Listening");
+    if (isSpeech) {
+      clearPendingTurnTimeout();
+      return;
+    }
+
+    if (!state.pendingTurnTimeoutId) {
+      state.pendingTurnTimeoutId = window.setTimeout(() => {
+        void finalizePendingTurn();
+      }, POST_SPEECH_MS);
+    }
+  }
+
+  function clearPendingTurnTimeout() {
+    if (state.pendingTurnTimeoutId !== null) {
+      window.clearTimeout(state.pendingTurnTimeoutId);
+      state.pendingTurnTimeoutId = null;
+    }
+  }
+
+  async function finalizePendingTurn() {
+    if (!state.running || !state.speechActive || state.segmentProcessingPromise) {
+      clearPendingTurnTimeout();
+      return;
+    }
+
+    clearPendingTurnTimeout();
+    const rawSegment = concatenateChunks(state.segment);
+    const recentAudio = concatenateChunks(state.recentAudioChunks);
+    const smartTurnInput = prepareSmartTurnAudio(recentAudio);
+    const speechDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
+    const recentDurationSec = Math.min(recentAudio.length, SMART_INPUT_SAMPLES) / RATE;
+
+    resetCaptureState();
+
+    const processingPromise = (async () => {
+      try {
+        await processSegment(smartTurnInput, speechDurationSec, recentDurationSec);
+        if (state.running) {
+          setUiState("Listening");
+        }
+      } catch (error) {
+        setUiState("Error");
+        els.detailText.textContent = error.message || String(error);
+        stop();
+      }
+    })();
+
+    state.segmentProcessingPromise = processingPromise;
+    try {
+      await processingPromise;
+    } finally {
+      if (state.segmentProcessingPromise === processingPromise) {
+        state.segmentProcessingPromise = null;
       }
     }
   }
