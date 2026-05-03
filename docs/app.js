@@ -4,6 +4,7 @@
   const RATE = 16000;
   const CHUNK = 512;
   const INITIAL_VAD_THRESHOLD = 0.2;
+  const INITIAL_TURN_THRESHOLD = 0.8;
   const PRE_SPEECH_MS = 200;
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
@@ -31,6 +32,8 @@
     vadAvgText: document.getElementById("vadAvgText"),
     vadThresholdSlider: document.getElementById("vadThresholdSlider"),
     vadThresholdText: document.getElementById("vadThresholdText"),
+    turnThresholdSlider: document.getElementById("turnThresholdSlider"),
+    turnThresholdText: document.getElementById("turnThresholdText"),
     smartTurnAvgText: document.getElementById("smartTurnAvgText"),
     featureAvgText: document.getElementById("featureAvgText"),
     backendText: document.getElementById("backendText"),
@@ -57,6 +60,7 @@
     vadQueue: [],
     vadBusy: false,
     vadThreshold: INITIAL_VAD_THRESHOLD,
+    turnThreshold: INITIAL_TURN_THRESHOLD,
     speechActive: false,
     preBuffer: [],
     segment: [],
@@ -208,6 +212,11 @@
 
       return Float32Array.from(output);
     }
+
+    reset() {
+      this.pending = new Float32Array(0);
+      this.position = 0;
+    }
   }
 
   class SmartTurnPredictor {
@@ -228,7 +237,6 @@
       const firstOutput = outputs[this.session.outputNames[0]];
       const probability = Number(firstOutput.data[0]);
       return {
-        prediction: probability > 0.5 ? 1 : 0,
         probability,
         timings: {
           featureMs,
@@ -656,7 +664,7 @@
       resetRuntimeStats();
       resetGraphHistory();
       state.running = true;
-      setVadThresholdControlDisabled(true);
+      setThresholdControlsDisabled(true);
       els.stopButton.disabled = false;
       setUiState("Listening");
       els.detailText.textContent = `${state.uiState} | Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz | Backend ${state.inferenceBackend} | Features ${state.featureBackend}`;
@@ -665,7 +673,7 @@
       setUiState("Error");
       els.detailText.textContent = error.message || String(error);
       els.startButton.disabled = false;
-      setVadThresholdControlDisabled(false);
+      setThresholdControlsDisabled(false);
     }
   }
 
@@ -696,7 +704,7 @@
     resetCaptureState();
     els.startButton.disabled = false;
     els.stopButton.disabled = true;
-    setVadThresholdControlDisabled(false);
+    setThresholdControlsDisabled(false);
     setUiState(state.modelsReady ? "Ready" : "Idle");
   }
 
@@ -713,6 +721,14 @@
     state.waveformHistory = [];
     state.vadHistory = [];
     state.turnHistory = [];
+  }
+
+  function clearAudioBuffers() {
+    state.vadQueue = [];
+    resetCaptureState();
+    if (state.resampler) {
+      state.resampler.reset();
+    }
   }
 
   function onAudioProcess(event) {
@@ -807,6 +823,7 @@
     const started = performance.now();
     try {
       const result = await state.smartTurn.predict(audio);
+      result.prediction = result.probability >= state.turnThreshold ? 1 : 0;
       const elapsed = performance.now() - started;
       recordRuntime("smartTurn", result.timings.onnxMs);
       recordRuntime("feature", result.timings.featureMs);
@@ -814,6 +831,9 @@
       state.lastProbability = result.probability;
       pushLimited(state.turnHistory, result.probability, 80);
       renderPrediction(result, capturedDurationSec, elapsed);
+      if (result.prediction === 1) {
+        clearAudioBuffers();
+      }
     } finally {
       state.inferenceBusy = false;
     }
@@ -916,7 +936,7 @@
     const laneH = (height - pad * 2 - gap * 2) / 3;
     drawLane(ctx, pad, pad, width - pad * 2, laneH, "Wave RMS", state.waveformHistory, "#237f8f");
     drawLane(ctx, pad, pad + laneH + gap, width - pad * 2, laneH, "VAD probability", state.vadHistory, "#cf6d31", state.vadThreshold);
-    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Turn-taking probability", state.turnHistory, "#4f6f3d", null, true);
+    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Turn-taking probability", state.turnHistory, "#4f6f3d", state.turnThreshold, true);
 
     requestAnimationFrame(drawGraph);
   }
@@ -988,9 +1008,19 @@
     }
   }
 
-  function setVadThresholdControlDisabled(disabled) {
+  function setTurnThreshold(value) {
+    state.turnThreshold = clamp01(Number(value));
+    if (els.turnThresholdText) {
+      els.turnThresholdText.textContent = state.turnThreshold.toFixed(2);
+    }
+  }
+
+  function setThresholdControlsDisabled(disabled) {
     if (els.vadThresholdSlider) {
       els.vadThresholdSlider.disabled = disabled;
+    }
+    if (els.turnThresholdSlider) {
+      els.turnThresholdSlider.disabled = disabled;
     }
   }
 
@@ -1000,6 +1030,12 @@
     setVadThreshold(els.vadThresholdSlider.value);
     els.vadThresholdSlider.addEventListener("input", (event) => {
       setVadThreshold(event.target.value);
+    });
+  }
+  if (els.turnThresholdSlider) {
+    setTurnThreshold(els.turnThresholdSlider.value);
+    els.turnThresholdSlider.addEventListener("input", (event) => {
+      setTurnThreshold(event.target.value);
     });
   }
   requestAnimationFrame(drawGraph);
