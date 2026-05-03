@@ -569,9 +569,17 @@
       executionProviders: [backend],
       graphOptimizationLevel: "all",
     };
+    const smartTurnSessionOptions = backend === "webgpu"
+      ? sessionOptions
+      : {
+          executionProviders: [backend],
+          executionMode: "sequential",
+          interOpNumThreads: 1,
+          graphOptimizationLevel: "all",
+        };
     const smartTurnModelPath = backend === "webgpu" ? MODEL_PATHS.smartTurnGpu : MODEL_PATHS.smartTurnCpu;
     const vadSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
-    const smartSession = await ortRuntime.InferenceSession.create(smartTurnModelPath, sessionOptions);
+    const smartSession = await ortRuntime.InferenceSession.create(smartTurnModelPath, smartTurnSessionOptions);
     if (backend === "webgpu") {
       await validateModelSessions(ortRuntime, vadSession, smartSession);
     }
