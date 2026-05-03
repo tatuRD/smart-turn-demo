@@ -80,6 +80,7 @@
     waveformHistory: createZeroHistory(WAVEFORM_HISTORY_LENGTH),
     vadHistory: createZeroHistory(VAD_HISTORY_LENGTH),
     turnHistory: createZeroHistory(TURN_HISTORY_LENGTH),
+    turnEventHistory: Array(TURN_HISTORY_LENGTH).fill(false),
     timings: {
       vad: { total: 0, count: 0 },
       smartTurn: { total: 0, count: 0 },
@@ -746,6 +747,7 @@
     state.waveformHistory = createZeroHistory(WAVEFORM_HISTORY_LENGTH);
     state.vadHistory = createZeroHistory(VAD_HISTORY_LENGTH);
     state.turnHistory = createZeroHistory(TURN_HISTORY_LENGTH);
+    state.turnEventHistory = Array(TURN_HISTORY_LENGTH).fill(false);
   }
 
   function onAudioProcess(event) {
@@ -808,6 +810,7 @@
     }
     pushLimited(state.vadHistory, vadProb, VAD_HISTORY_LENGTH);
     pushLimited(state.turnHistory, 0, TURN_HISTORY_LENGTH);
+    pushLimited(state.turnEventHistory, false, TURN_HISTORY_LENGTH);
 
     const isSpeech = vadProb >= state.vadThreshold;
     if (!state.speechActive) {
@@ -902,6 +905,7 @@
       state.lastPrediction = result.prediction;
       state.lastProbability = result.probability;
       stampLatestHistoryValue(state.turnHistory, result.probability);
+      stampLatestHistoryFlag(state.turnEventHistory, true);
       renderPrediction(result, speechDurationSec, recentDurationSec, elapsed);
       if (result.prediction === 1) {
         resetRecentAudioState();
@@ -987,6 +991,21 @@
     pushLimited(list, normalizedValue, TURN_HISTORY_LENGTH);
   }
 
+  function stampLatestHistoryFlag(list, value) {
+    if (!list.length) {
+      list.push(Boolean(value));
+      return;
+    }
+
+    const lastIndex = list.length - 1;
+    if (!list[lastIndex]) {
+      list[lastIndex] = Boolean(value);
+      return;
+    }
+
+    pushLimited(list, Boolean(value), TURN_HISTORY_LENGTH);
+  }
+
   function yieldToMainThread() {
     return new Promise((resolve) => {
       const started = performance.now();
@@ -1044,14 +1063,20 @@
     const laneH = (height - pad * 2 - gap * 2) / 3;
     drawLane(ctx, pad, pad, width - pad * 2, laneH, "Wave RMS", state.waveformHistory, "#237f8f");
     drawLane(ctx, pad, pad + laneH + gap, width - pad * 2, laneH, "VAD probability", state.vadHistory, "#cf6d31", state.vadThreshold);
-    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Turn-taking probability", state.turnHistory, "#4f6f3d", state.turnThreshold, true);
+    drawLane(ctx, pad, pad + (laneH + gap) * 2, width - pad * 2, laneH, "Turn-taking probability", state.turnHistory, "#4f6f3d", state.turnThreshold, {
+      bars: true,
+      eventFlags: state.turnEventHistory,
+      aboveThresholdColor: "#2f8f5b",
+      belowThresholdColor: "#cf5c36",
+    });
 
     requestAnimationFrame(drawGraph);
   }
 
-  function drawLane(ctx, x, y, w, h, label, values, color, threshold = null, bars = false) {
+  function drawLane(ctx, x, y, w, h, label, values, color, threshold = null, options = {}) {
     ctx.save();
     const dpr = window.devicePixelRatio || 1;
+    const { bars = false, eventFlags = null, aboveThresholdColor = color, belowThresholdColor = color } = options;
     const labelFontSize = 12 * dpr;
     const labelGap = 8 * dpr;
     const plotY = y + labelFontSize + labelGap;
@@ -1082,10 +1107,30 @@
       ctx.lineWidth = 2;
       if (bars) {
         const step = w / Math.max(values.length, 12);
+        const markerRadius = 2.5 * dpr;
+        const markerY = plotY + plotH + 6 * dpr;
         values.forEach((value, index) => {
-          const barH = Math.max(2, plotH * clamp01(value));
-          const bx = x + index * step;
-          ctx.fillRect(bx + 2, plotY + plotH - barH, Math.max(3, step - 4), barH);
+          const normalizedValue = clamp01(value);
+          const executed = !eventFlags || eventFlags[index] === true;
+          if (!executed) {
+            return;
+          }
+
+          const passedThreshold = threshold === null || normalizedValue >= threshold;
+          const barColor = passedThreshold ? aboveThresholdColor : belowThresholdColor;
+          const barW = Math.max(3 * dpr, step - 4 * dpr);
+          const bx = x + index * step + Math.max(1 * dpr, (step - barW) / 2);
+          const rawBarH = plotH * normalizedValue;
+          const barH = normalizedValue > 0 ? Math.max(1.5 * dpr, rawBarH) : 0;
+
+          ctx.fillStyle = barColor;
+          if (barH > 0) {
+            ctx.fillRect(bx, plotY + plotH - barH, barW, barH);
+          }
+
+          ctx.beginPath();
+          ctx.arc(bx + barW / 2, markerY, markerRadius, 0, Math.PI * 2);
+          ctx.fill();
         });
       } else {
         ctx.beginPath();
