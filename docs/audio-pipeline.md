@@ -8,9 +8,10 @@
 2. `AudioContext` の入力サンプルレートから `16 kHz` に逐次リサンプルする。
 3. リサンプル済みサンプルを `vadQueue` に積み、`512 samples` ごとに VAD を実行する。
 4. VAD が発話開始を検出したら、直前の `preBuffer` を含めて `segment` に取り込み続ける。
-5. 同時に、連続音声の直近 `8 秒` は常に別バッファに保持し続ける。
-6. VAD が無音に戻ったら、そこで即終了にせず `200 ms` 待つ。その間に発話が再開しなければ、その時点の「直近 8 秒」を smart-turn に渡す。
+5. 同時に、`前回の Complete 判定以降` の音声を smart-turn 入力バッファに保持し続ける。
+6. VAD が無音に戻ったら、そこで即終了にせず `200 ms` 待つ。その間に発話が再開しなければ、その時点の smart-turn 入力バッファを `8 秒固定長` に整形して smart-turn に渡す。
 7. smart-turn の確率値をしきい値で 2 値化し、`Complete` / `Incomplete` を決める。
+8. smart-turn が `Complete` なら、その判定が返ったタイミングで smart-turn 入力バッファを空にする。`Incomplete` ならバッファは保持する。
 
 この実装では smart-turn はストリーミング推論ではなく、`発話終了候補から 200 ms の静音が続いた時点で 1 回だけ` 実行されます。
 
@@ -122,11 +123,11 @@ VAD 実行中は `vadBusy = true` になり、同時に複数の `drainVadQueue(
 
 ### `recentAudioChunks`
 
-- smart-turn へ渡すための連続ローリング音声
+- smart-turn へ渡すための入力バッファ
 - VAD 状態に関係なく、すべての処理済みチャンクを追加
 - 最大 `250 chunks = 8 秒` に制限
 
-こちらは `segment` と違って、「今が発話中かどうか」に関係なく動き続けます。smart-turn が実際に見るのはこのローリング 8 秒です。
+こちらは `segment` と違って、「今が発話中かどうか」に関係なく動き続けます。`Complete` が返るまでは内容を保持し続け、`Complete` が返ったタイミングで空になります。smart-turn が実際に見るのは、このバッファを `8 秒固定長` に整形した音声です。
 
 ### 発話開始
 
@@ -147,10 +148,11 @@ VAD 実行中は `vadBusy = true` になり、同時に複数の `drainVadQueue(
 3. タイマー中も後続チャンクは通常どおり `segment` / `recentAudioChunks` に追加される
 4. その `200 ms` の間に `vadProb >= threshold` に戻れば、タイマーを取り消して同じ発話を継続する
 5. `200 ms` 経過しても無音のままなら、`segment` 全体を連結して発話長を求める
-6. 同時に `recentAudioChunks` 全体を連結し、その時点の直近音声を得る
-7. `prepareSmartTurnAudio()` で、その直近音声を `8 秒固定長` に整形する
+6. 同時に `recentAudioChunks` 全体を連結し、`前回の Complete 判定以降` にたまった smart-turn 用音声を得る
+7. `prepareSmartTurnAudio()` で、その音声を `8 秒固定長` に整形する
 8. `resetCaptureState()` で `preBuffer` / `segment` / VAD 状態を消す
 9. smart-turn を 1 回実行する
+10. 判定結果が `Complete` なら、推論完了時に `recentAudioChunks` を空にする
 
 ここで重要なのは、`発話終了候補になった最初の無音チャンク` だけでなく、`その後 200 ms の待機中に入った無音チャンク` も `segment` と `recentAudioChunks` の両方に含まれることです。
 
@@ -158,10 +160,10 @@ VAD 実行中は `vadBusy = true` になり、同時に複数の `drainVadQueue(
 
 ### 入力
 
-smart-turn に渡す音声は常に `Float32Array(128000)` です。元になる素材は、発話区間そのものではなく、`発話終了候補から 200 ms 待ったあとの直近 8 秒のローリング音声` です。
+smart-turn に渡す音声は常に `Float32Array(128000)` です。元になる素材は、発話区間そのものではなく、`前回の Complete 判定以降` に smart-turn 用バッファへたまった音声です。
 
-- 直近音声が `8 秒` を超える場合: `末尾 8 秒` を切り出す
-- 直近音声が `8 秒` 未満の場合: `先頭側を 0 埋め` して右寄せする
+- バッファ音声が `8 秒` を超える場合: `末尾 8 秒` を切り出す
+- バッファ音声が `8 秒` 未満の場合: `先頭側を 0 埋め` して右寄せする
 
 その後、特徴量抽出器で次を行います。
 
@@ -187,6 +189,11 @@ smart-turn モデルの第 1 出力を `probability` として読みます。こ
 
 と判定します。
 
+さらに:
+
+- `Complete` の場合は、推論結果が返った直後に `recentAudioChunks` を空にする
+- `Incomplete` の場合は、`recentAudioChunks` を保持し、次回の smart-turn 入力に引き継ぐ
+
 ## 推論中に入ってくる音声の扱い
 
 smart-turn 推論中も `onaudioprocess` 自体は止まらないため、新しいマイク音声は引き続き `vadQueue` やリサンプラ内部にたまります。
@@ -197,9 +204,10 @@ smart-turn 推論中も `onaudioprocess` 自体は止まらないため、新し
 - リサンプラの `pending` / `position` も保持される
 - `recentAudioChunks` も保持される
 - 推論完了後、たまっていた音声が先頭から VAD に流れる
-- その結果、後続音声は次の `preBuffer` / `segment` に取り込まれつつ、ローリング 8 秒にも継続して残る
+- `Incomplete` の場合、その結果、後続音声は次の `preBuffer` / `segment` に取り込まれつつ、smart-turn 用バッファにも継続して残る
+- `Complete` の場合、推論完了時に `recentAudioChunks` を空にするため、推論中に入ってきた後続音声もまとめて破棄される
 
-つまり、`Complete` / `Incomplete` に関係なく、推論中に入ってきた後続音声は捨てません。実装上は「smart-turn 判定中にも次ターンの録音素材を溜め続ける」挙動です。
+つまり、smart-turn 判定中も次ターン候補の音声は取り込み続けますが、`Complete` が返った場合だけ、その時点で smart-turn 用バッファを切り直します。
 
 ## 状態遷移の見方
 
@@ -216,12 +224,12 @@ smart-turn 推論中も `onaudioprocess` 自体は止まらないため、新し
 
 - VAD は `32 ms` ごとの逐次判定
 - smart-turn は `VAD OFF` 直後ではなく、`200 ms` の静音継続確認後に単発判定
-- smart-turn 入力は常に `直近 8 秒` を元にした `8 秒固定長`
+- smart-turn 入力は `前回の Complete 判定以降` のバッファを元にした `8 秒固定長`
 - 短い音声は `左ゼロ埋め`, 長い音声は `末尾だけ使用`
 - `preBuffer` により、発話先頭は約 `224 ms` さかのぼって保持
 - 発話末尾には、終端候補になった最初の無音チャンクと、その後 `200 ms` の待機中に入った無音も含まれる
 - `segment` は発話境界の管理用で、smart-turn の実入力は `recentAudioChunks` から作る
-- smart-turn 推論中に入ってきた後続音声も保持し、次の発話候補として処理する
+- `Incomplete` では smart-turn 入力バッファを保持し、`Complete` でだけ空にする
 
 ## 参照箇所
 

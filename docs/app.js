@@ -903,6 +903,9 @@
       state.lastProbability = result.probability;
       stampLatestHistoryValue(state.turnHistory, result.probability);
       renderPrediction(result, speechDurationSec, recentDurationSec, elapsed);
+      if (result.prediction === 1) {
+        resetRecentAudioState();
+      }
     } finally {
       state.inferenceBusy = false;
     }
@@ -948,7 +951,7 @@
       els.resultMetric.classList.toggle("complete", complete);
       els.resultMetric.classList.toggle("incomplete", !complete);
     }
-    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Speech ${speechDurationSec.toFixed(2)} s | Recent ${recentDurationSec.toFixed(2)} s | Window ${MAX_DURATION_SECONDS.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
+    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Speech ${speechDurationSec.toFixed(2)} s | Buffer ${recentDurationSec.toFixed(2)} s | Window ${MAX_DURATION_SECONDS.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
     if (els.historyList) {
       const li = document.createElement("li");
