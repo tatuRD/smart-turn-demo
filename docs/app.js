@@ -5,7 +5,6 @@
   const CHUNK = 512;
   const INITIAL_VAD_THRESHOLD = 0.2;
   const INITIAL_TURN_THRESHOLD = 0.8;
-  const PRE_SPEECH_MS = 200;
   const POST_SPEECH_MS = 200;
   const MAX_DURATION_SECONDS = 8;
   const MODEL_RESET_STATES_TIME = 5000;
@@ -68,8 +67,6 @@
     turnThreshold: INITIAL_TURN_THRESHOLD,
     speechActive: false,
     pendingTurnTimeoutId: null,
-    preBuffer: [],
-    segment: [],
     recentAudioChunks: [],
     lastVad: 0,
     lastPrediction: null,
@@ -94,8 +91,6 @@
     feature: "featureAvgText",
   };
 
-  const chunkMs = (CHUNK / RATE) * 1000;
-  const preChunks = Math.ceil(PRE_SPEECH_MS / chunkMs);
   const smartInputChunks = Math.ceil(SMART_INPUT_SAMPLES / CHUNK);
 
   checkForPageUpdate();
@@ -732,8 +727,6 @@
   function resetCaptureState() {
     clearPendingTurnTimeout();
     state.speechActive = false;
-    state.preBuffer = [];
-    state.segment = [];
     if (state.vad) {
       state.vad.reset();
     }
@@ -814,21 +807,11 @@
 
     const isSpeech = vadProb >= state.vadThreshold;
     if (!state.speechActive) {
-      state.preBuffer.push(chunk);
-      if (state.preBuffer.length > preChunks) {
-        state.preBuffer.shift();
-      }
       if (isSpeech) {
-        state.segment = state.preBuffer.slice();
         state.speechActive = true;
         setUiState("Recording speech");
       }
       return;
-    }
-
-    state.segment.push(chunk);
-    while (state.segment.length > smartInputChunks) {
-      state.segment.shift();
     }
 
     if (isSpeech) {
@@ -857,17 +840,15 @@
     }
 
     clearPendingTurnTimeout();
-    const rawSegment = concatenateChunks(state.segment);
     const recentAudio = concatenateChunks(state.recentAudioChunks);
     const smartTurnInput = prepareSmartTurnAudio(recentAudio);
-    const speechDurationSec = Math.min(rawSegment.length, SMART_INPUT_SAMPLES) / RATE;
     const recentDurationSec = Math.min(recentAudio.length, SMART_INPUT_SAMPLES) / RATE;
 
     resetCaptureState();
 
     const processingPromise = (async () => {
       try {
-        await processSegment(smartTurnInput, speechDurationSec, recentDurationSec);
+        await processSegment(smartTurnInput, recentDurationSec);
         if (state.running) {
           setUiState("Listening");
         }
@@ -888,7 +869,7 @@
     }
   }
 
-  async function processSegment(audio, speechDurationSec = audio.length / RATE, recentDurationSec = audio.length / RATE) {
+  async function processSegment(audio, recentDurationSec = audio.length / RATE) {
     if (!audio.length || state.inferenceBusy) {
       return;
     }
@@ -906,7 +887,7 @@
       state.lastProbability = result.probability;
       stampLatestHistoryValue(state.turnHistory, result.probability);
       stampLatestHistoryFlag(state.turnEventHistory, true);
-      renderPrediction(result, speechDurationSec, recentDurationSec, elapsed);
+      renderPrediction(result, recentDurationSec, elapsed);
       if (result.prediction === 1) {
         resetRecentAudioState();
       }
@@ -943,7 +924,7 @@
     }
   }
 
-  function renderPrediction(result, speechDurationSec, recentDurationSec, elapsedMs) {
+  function renderPrediction(result, recentDurationSec, elapsedMs) {
     const complete = result.prediction === 1;
     if (els.predictionText) {
       els.predictionText.textContent = complete ? "Complete" : "Incomplete";
@@ -955,7 +936,7 @@
       els.resultMetric.classList.toggle("complete", complete);
       els.resultMetric.classList.toggle("incomplete", !complete);
     }
-    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Speech ${speechDurationSec.toFixed(2)} s | Buffer ${recentDurationSec.toFixed(2)} s | Window ${MAX_DURATION_SECONDS.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
+    els.detailText.textContent = `${complete ? "Complete" : "Incomplete"} | p=${result.probability.toFixed(3)} | Buffer ${recentDurationSec.toFixed(2)} s | Window ${MAX_DURATION_SECONDS.toFixed(2)} s | Total ${elapsedMs.toFixed(1)} ms | Feature ${result.timings.featureMs.toFixed(1)} ms | Smart Turn ONNX ${result.timings.onnxMs.toFixed(1)} ms`;
 
     if (els.historyList) {
       const li = document.createElement("li");

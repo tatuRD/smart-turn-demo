@@ -64,6 +64,14 @@
           </div>
         </div>
         <canvas id="graphCanvas" width="1200" height="620"></canvas>
+        <section class="algorithm-summary" aria-label="Algorithm overview">
+          <h3>アルゴリズム概要</h3>
+          <ul class="algorithm-list">
+            <li><strong>VAD threshold</strong>: VAD probability がこの値以上なら ON、下回ると OFF とみなします。</li>
+            <li><strong>Turn-taking threshold</strong>: Smart Turn の出力確率がこの値以上ならターンテイキング <code>True</code>、未満なら <code>False</code> と判定します。</li>
+            <li><strong>Smart Turn 入力音声</strong>: マイクのモノラル音声を 16 kHz にリサンプリングして最大 8 秒ぶん保持し、発話終了後 200 ms で直近 8 秒を切り出して使います。短い場合は先頭をゼロ埋めし、その後 Whisper 互換の 80 x 800 log-Mel 特徴量に変換して推論します。出力確率がしきい値を超えて <code>True</code> になった場合は音声バッファを空にするため、同じ区間は次回の入力に含まれません。</li>
+          </ul>
+        </section>
       </section>
 
     </main>
