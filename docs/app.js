@@ -16,7 +16,8 @@
   const TURN_HISTORY_LENGTH = 420;
   const MAX_VAD_QUEUE_MS = 2000;
   const MAX_VAD_QUEUE_SAMPLES = Math.ceil((RATE * MAX_VAD_QUEUE_MS) / 1000);
-  const ORT_DIST_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+  const ORT_DIST_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/";
+  const ORT_LOCAL_WASM_BASE = "./vendor/";
   const ORT_WASM_URL = `${ORT_DIST_BASE}ort.min.mjs`;
   const ORT_WEBGPU_URL = `${ORT_DIST_BASE}ort.webgpu.min.mjs`;
   const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
@@ -663,8 +664,13 @@
   }
 
   async function loadOrtRuntime(backend) {
+    if (backend === "wasm" && window.ort) {
+      configureOrt(window.ort, "wasm");
+      return window.ort;
+    }
+
     const runtime = await import(backend === "webgpu" ? ORT_WEBGPU_URL : ORT_WASM_URL);
-    configureOrt(runtime);
+    configureOrt(runtime, backend);
     return runtime;
   }
 
@@ -679,10 +685,13 @@
     }
   }
 
-  function configureOrt(ortRuntime) {
-    ortRuntime.env.wasm.wasmPaths = ORT_DIST_BASE;
+  function configureOrt(ortRuntime, backend) {
+    ortRuntime.env.wasm.wasmPaths = backend === "webgpu" ? ORT_DIST_BASE : ORT_LOCAL_WASM_BASE;
     ortRuntime.env.wasm.numThreads = 1;
     ortRuntime.env.wasm.proxy = false;
+    if (backend === "webgpu" && ortRuntime.env.webgpu) {
+      ortRuntime.env.webgpu.powerPreference = "high-performance";
+    }
   }
 
   async function createVadSession(ortRuntime) {
