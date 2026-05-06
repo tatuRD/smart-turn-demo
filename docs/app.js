@@ -14,8 +14,8 @@
   const WAVEFORM_HISTORY_LENGTH = 420;
   const VAD_HISTORY_LENGTH = 420;
   const TURN_HISTORY_LENGTH = 420;
-  const ORT_WEBGPU_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/ort.webgpu.min.mjs";
-  const ORT_WEBGPU_WASM_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0-dev.20260410-5e55544225/dist/";
+  const ORT_DIST_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+  const ORT_WEBGPU_URL = `${ORT_DIST_BASE}ort.webgpu.min.mjs`;
   const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
 
   const MODEL_PATHS = {
@@ -23,8 +23,6 @@
     smartTurnCpu: withAssetVersion("./models/smart-turn-v3.2-cpu.onnx"),
     smartTurnGpu: withAssetVersion("./models/smart-turn-v3.2-gpu.onnx"),
   };
-
-  let ort = window.ort;
 
   const els = {
     startButton: document.getElementById("startButton"),
@@ -140,8 +138,9 @@
   }
 
   class SileroVAD {
-    constructor(session) {
+    constructor(session, runtime) {
       this.session = session;
+      this.runtime = runtime;
       this.contextSize = 64;
       this.lastReset = performance.now();
       this.reset();
@@ -169,9 +168,9 @@
       input.set(chunk, this.contextSize);
 
       const feeds = {
-        input: new ort.Tensor("float32", input, [1, this.contextSize + CHUNK]),
-        state: new ort.Tensor("float32", this.vadState, [2, 1, 128]),
-        sr: new ort.Tensor("int64", BigInt64Array.from([16000n]), []),
+        input: new this.runtime.Tensor("float32", input, [1, this.contextSize + CHUNK]),
+        state: new this.runtime.Tensor("float32", this.vadState, [2, 1, 128]),
+        sr: new this.runtime.Tensor("int64", BigInt64Array.from([16000n]), []),
       };
 
       const outputs = await this.session.run(feeds);
@@ -228,16 +227,17 @@
   }
 
   class SmartTurnPredictor {
-    constructor(session, extractor) {
+    constructor(session, extractor, runtime) {
       this.session = session;
       this.extractor = extractor;
+      this.runtime = runtime;
     }
 
     async predict(audio) {
       const featureStarted = performance.now();
       const { features, yieldWaitMs } = await this.extractor.extract(audio);
       const featureMs = Math.max(0, performance.now() - featureStarted - yieldWaitMs);
-      const input = new ort.Tensor("float32", features, [1, 80, 800]);
+      const input = new this.runtime.Tensor("float32", features, [1, 80, 800]);
 
       const onnxStarted = performance.now();
       const outputs = await this.session.run({ input_features: input });
@@ -533,7 +533,6 @@
 
     state.featureExtractor = new BuiltInWhisperFeatureExtractor();
     state.featureBackend = "Built-in";
-    updateBackendText();
   }
 
   async function ensureOrtRuntime() {
@@ -541,24 +540,16 @@
       return;
     }
 
-    const wantsWebGpu = await canUseWebGpu();
-    if (wantsWebGpu) {
-      try {
-        const webgpuOrt = await import(ORT_WEBGPU_URL);
-        configureOrt(webgpuOrt, "webgpu");
-        await createModelSessions(webgpuOrt, "webgpu");
-        return;
-      } catch (error) {
-        console.warn("WebGPU backend failed; falling back to WASM.", error);
-      }
-    }
+    const ortRuntime = await import(ORT_WEBGPU_URL);
+    configureOrt(ortRuntime);
 
-    const wasmOrt = window.ort || ort;
-    if (!wasmOrt) {
-      throw new Error("ONNX Runtime Web is not available.");
-    }
-    configureOrt(wasmOrt, "wasm");
-    await createModelSessions(wasmOrt, "wasm");
+    const vadSession = await createVadSession(ortRuntime);
+    const { session: smartSession, backend } = await createSmartTurnSession(ortRuntime);
+
+    state.vad = new SileroVAD(vadSession, ortRuntime);
+    state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor, ortRuntime);
+    state.inferenceBackend = backend;
+    updateBackendText();
   }
 
   async function canUseWebGpu() {
@@ -566,60 +557,50 @@
       return false;
     }
     try {
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-      return Boolean(adapter);
-    } catch (error) {
-      console.warn("WebGPU adapter check failed.", error);
+      return Boolean(await navigator.gpu.requestAdapter());
+    } catch {
       return false;
     }
   }
 
-  function configureOrt(ortRuntime, backend) {
-    ort = ortRuntime;
-    if (backend === "webgpu") {
-      ort.env.wasm.wasmPaths = {
-        mjs: `${ORT_WEBGPU_WASM_BASE}ort-wasm-simd-threaded.jsep.mjs`,
-        wasm: `${ORT_WEBGPU_WASM_BASE}ort-wasm-simd-threaded.jsep.wasm`,
-      };
-      ort.env.webgpu.powerPreference = "high-performance";
-    } else {
-      ort.env.wasm.wasmPaths = "./vendor/";
-    }
-    ort.env.wasm.numThreads = 1;
-    ort.env.wasm.proxy = false;
+  function configureOrt(ortRuntime) {
+    ortRuntime.env.wasm.wasmPaths = ORT_DIST_BASE;
+    ortRuntime.env.wasm.numThreads = 1;
+    ortRuntime.env.wasm.proxy = false;
   }
 
-  async function createModelSessions(ortRuntime, backend) {
+  async function createVadSession(ortRuntime) {
     const sessionOptions = {
-      executionProviders: [backend],
+      executionProviders: ["wasm"],
       graphOptimizationLevel: "all",
     };
-    const smartTurnSessionOptions = backend === "webgpu"
-      ? sessionOptions
-      : {
-          executionProviders: [backend],
-          executionMode: "sequential",
-          interOpNumThreads: 1,
-          graphOptimizationLevel: "all",
-        };
-    const smartTurnModelPath = backend === "webgpu" ? MODEL_PATHS.smartTurnGpu : MODEL_PATHS.smartTurnCpu;
-    const vadSession = await ortRuntime.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
-    const smartSession = await ortRuntime.InferenceSession.create(smartTurnModelPath, smartTurnSessionOptions);
-    if (backend === "webgpu") {
-      await validateModelSessions(ortRuntime, vadSession, smartSession);
-    }
-    state.vad = new SileroVAD(vadSession);
-    state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor);
-    state.inferenceBackend = backend === "webgpu" ? "WebGPU" : "Wasm";
-    updateBackendText();
+    return ortRuntime.InferenceSession.create(MODEL_PATHS.vad, sessionOptions);
   }
 
-  async function validateModelSessions(ortRuntime, vadSession, smartSession) {
-    await vadSession.run({
-      input: new ortRuntime.Tensor("float32", new Float32Array(64 + CHUNK), [1, 64 + CHUNK]),
-      state: new ortRuntime.Tensor("float32", new Float32Array(2 * 1 * 128), [2, 1, 128]),
-      sr: new ortRuntime.Tensor("int64", BigInt64Array.from([16000n]), []),
+  async function createSmartTurnSession(ortRuntime) {
+    if (await canUseWebGpu()) {
+      try {
+        const session = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurnGpu, {
+          executionProviders: ["webgpu"],
+          graphOptimizationLevel: "all",
+        });
+        await validateSmartTurnSession(ortRuntime, session);
+        return { session, backend: "WebGPU" };
+      } catch {
+        // Fall back to the CPU model when WebGPU initialization or validation fails.
+      }
+    }
+
+    const session = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurnCpu, {
+      executionProviders: ["wasm"],
+      executionMode: "sequential",
+      interOpNumThreads: 1,
+      graphOptimizationLevel: "all",
     });
+    return { session, backend: "Wasm" };
+  }
+
+  async function validateSmartTurnSession(ortRuntime, smartSession) {
     await smartSession.run({
       input_features: new ortRuntime.Tensor("float32", new Float32Array(80 * SMART_INPUT_FRAMES), [1, 80, SMART_INPUT_FRAMES]),
     });
