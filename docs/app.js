@@ -14,6 +14,8 @@
   const WAVEFORM_HISTORY_LENGTH = 420;
   const VAD_HISTORY_LENGTH = 420;
   const TURN_HISTORY_LENGTH = 420;
+  const MAX_VAD_QUEUE_MS = 2000;
+  const MAX_VAD_QUEUE_SAMPLES = Math.ceil((RATE * MAX_VAD_QUEUE_MS) / 1000);
   const ORT_DIST_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
   const ORT_WEBGPU_URL = `${ORT_DIST_BASE}ort.webgpu.min.mjs`;
   const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
@@ -62,7 +64,11 @@
     featureExtractor: null,
     inferenceBackend: "--",
     featureBackend: "--",
-    vadQueue: [],
+    vadQueue: new Float32Array(MAX_VAD_QUEUE_SAMPLES),
+    vadQueueReadIndex: 0,
+    vadQueueWriteIndex: 0,
+    vadQueueSampleCount: 0,
+    vadQueueDroppedSamples: 0,
     vadBusy: false,
     vadThreshold: INITIAL_VAD_THRESHOLD,
     turnThreshold: INITIAL_TURN_THRESHOLD,
@@ -699,8 +705,8 @@
       state.audioContext = null;
     }
     state.resampler = null;
-    state.vadQueue = [];
     state.vadBusy = false;
+    resetVadQueue();
     resetCaptureState();
     resetRecentAudioState();
     els.startButton.disabled = false;
@@ -719,6 +725,13 @@
 
   function resetRecentAudioState() {
     state.recentAudioChunks = [];
+  }
+
+  function resetVadQueue() {
+    state.vadQueueReadIndex = 0;
+    state.vadQueueWriteIndex = 0;
+    state.vadQueueSampleCount = 0;
+    state.vadQueueDroppedSamples = 0;
   }
 
   function resetGraphHistory() {
@@ -741,12 +754,61 @@
   }
 
   function appendSamplesToQueue(samples) {
-    for (let i = 0; i < samples.length; i += 1) {
-      state.vadQueue.push(samples[i]);
+    if (!samples.length) {
+      return;
     }
+
+    const queue = state.vadQueue;
+    const capacity = queue.length;
+    if (samples.length >= capacity) {
+      const tail = samples.subarray(samples.length - capacity);
+      queue.set(tail, 0);
+      state.vadQueueReadIndex = 0;
+      state.vadQueueWriteIndex = 0;
+      state.vadQueueDroppedSamples += state.vadQueueSampleCount + (samples.length - capacity);
+      state.vadQueueSampleCount = capacity;
+    } else {
+      const overflow = Math.max(0, state.vadQueueSampleCount + samples.length - capacity);
+      if (overflow > 0) {
+        state.vadQueueReadIndex = (state.vadQueueReadIndex + overflow) % capacity;
+        state.vadQueueSampleCount -= overflow;
+        state.vadQueueDroppedSamples += overflow;
+      }
+
+      const firstWrite = Math.min(samples.length, capacity - state.vadQueueWriteIndex);
+      queue.set(samples.subarray(0, firstWrite), state.vadQueueWriteIndex);
+      const remaining = samples.length - firstWrite;
+      if (remaining > 0) {
+        queue.set(samples.subarray(firstWrite), 0);
+      }
+
+      state.vadQueueWriteIndex = (state.vadQueueWriteIndex + samples.length) % capacity;
+      state.vadQueueSampleCount += samples.length;
+    }
+
     if (!state.vadBusy) {
-      drainVadQueue();
+      void drainVadQueue();
     }
+  }
+
+  function shiftVadChunk(size) {
+    if (state.vadQueueSampleCount < size) {
+      return null;
+    }
+
+    const chunk = new Float32Array(size);
+    const queue = state.vadQueue;
+    const capacity = queue.length;
+    const firstRead = Math.min(size, capacity - state.vadQueueReadIndex);
+    chunk.set(queue.subarray(state.vadQueueReadIndex, state.vadQueueReadIndex + firstRead), 0);
+    const remaining = size - firstRead;
+    if (remaining > 0) {
+      chunk.set(queue.subarray(0, remaining), firstRead);
+    }
+
+    state.vadQueueReadIndex = (state.vadQueueReadIndex + size) % capacity;
+    state.vadQueueSampleCount -= size;
+    return chunk;
   }
 
   async function drainVadQueue() {
@@ -757,11 +819,13 @@
           await state.segmentProcessingPromise;
           continue;
         }
-        if (state.vadQueue.length < CHUNK) {
+        if (state.vadQueueSampleCount < CHUNK) {
           break;
         }
-        const chunk = Float32Array.from(state.vadQueue.slice(0, CHUNK));
-        state.vadQueue.splice(0, CHUNK);
+        const chunk = shiftVadChunk(CHUNK);
+        if (!chunk) {
+          break;
+        }
         await processChunk(chunk);
       }
     } catch (error) {
