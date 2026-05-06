@@ -17,6 +17,7 @@
   const MAX_VAD_QUEUE_MS = 2000;
   const MAX_VAD_QUEUE_SAMPLES = Math.ceil((RATE * MAX_VAD_QUEUE_MS) / 1000);
   const ORT_DIST_BASE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+  const ORT_WASM_URL = `${ORT_DIST_BASE}ort.min.mjs`;
   const ORT_WEBGPU_URL = `${ORT_DIST_BASE}ort.webgpu.min.mjs`;
   const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
 
@@ -161,16 +162,8 @@
     }
   }
 
-  function isLikelyMobileDevice() {
-    const ua = navigator.userAgent;
-    return /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
-  }
-
   function inferInitialBackendPreference() {
-    if (!navigator.gpu) {
-      return "wasm";
-    }
-    return isLikelyMobileDevice() ? "wasm" : "webgpu";
+    return "wasm";
   }
 
   function getBackendDisplayName(backend) {
@@ -188,13 +181,19 @@
     }
   }
 
+  async function releaseOrtSession(session) {
+    if (session?.release) {
+      await session.release().catch(() => {});
+    }
+  }
+
   async function releaseOrtSessions() {
     const releases = [];
-    if (state.vad?.session?.release) {
-      releases.push(state.vad.session.release().catch(() => {}));
+    if (state.vad?.session) {
+      releases.push(releaseOrtSession(state.vad.session));
     }
-    if (state.smartTurn?.session?.release) {
-      releases.push(state.smartTurn.session.release().catch(() => {}));
+    if (state.smartTurn?.session) {
+      releases.push(releaseOrtSession(state.smartTurn.session));
     }
 
     state.vad = null;
@@ -643,16 +642,30 @@
       return;
     }
 
-    const ortRuntime = await import(ORT_WEBGPU_URL);
-    configureOrt(ortRuntime);
+    let vadSession = null;
+    let smartSession = null;
+    try {
+      const wasmRuntime = await loadOrtRuntime("wasm");
+      vadSession = await createVadSession(wasmRuntime);
 
-    const vadSession = await createVadSession(ortRuntime);
-    const { session: smartSession, backend } = await createSmartTurnSession(ortRuntime);
+      const smartRuntime = state.preferredBackend === "webgpu" ? await loadOrtRuntime("webgpu") : wasmRuntime;
+      const smart = await createSmartTurnSession(smartRuntime);
+      smartSession = smart.session;
 
-    state.vad = new SileroVAD(vadSession, ortRuntime);
-    state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor, ortRuntime);
-    state.inferenceBackend = backend;
-    updateBackendText();
+      state.vad = new SileroVAD(vadSession, wasmRuntime);
+      state.smartTurn = new SmartTurnPredictor(smartSession, state.featureExtractor, smartRuntime);
+      state.inferenceBackend = smart.backend;
+      updateBackendText();
+    } catch (error) {
+      await Promise.all([releaseOrtSession(vadSession), releaseOrtSession(smartSession)]);
+      throw error;
+    }
+  }
+
+  async function loadOrtRuntime(backend) {
+    const runtime = await import(backend === "webgpu" ? ORT_WEBGPU_URL : ORT_WASM_URL);
+    configureOrt(runtime);
+    return runtime;
   }
 
   async function canUseWebGpu() {

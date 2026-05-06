@@ -7,7 +7,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <meta name="app-version" content="2026-05-07-3">
+    <meta name="app-version" content="2026-05-07-8">
     <title>Smart Turn Browser Demo</title>
     <script>
       window.__APP_ASSET_VERSION__ = String(Math.floor(Date.now() / 1000));
@@ -16,19 +16,15 @@
   </head>
   <body>
     <main class="app-shell">
-      <section class="warning-banner" aria-label="Backend caution">
-        <p><strong>注意:</strong> スマホでは GPU で実行するとブラウザがクラッシュする可能性があります。安定性を優先する場合は CPU を選択してください。</p>
-      </section>
-
       <section class="topbar" aria-label="Smart Turn controls">
         <div>
           <p class="eyebrow">Local ONNX inference</p>
           <h1>Smart Turn Demo</h1>
         </div>
-        <div class="controls">
-          <button id="startButton" type="button">Start</button>
-          <button id="stopButton" type="button" disabled>Stop</button>
-        </div>
+      </section>
+
+      <section class="warning-banner" aria-label="Backend caution">
+        <p><strong>注意:</strong> スマホでは GPU で実行するとブラウザがクラッシュする可能性があります。安定性を優先する場合は CPU を選択してください。</p>
       </section>
 
       <section class="status-grid" aria-label="Current status">
@@ -71,6 +67,13 @@
               <span>GPU</span>
             </label>
           </div>
+        </div>
+      </section>
+
+      <section class="graph-controls" aria-label="Recording controls">
+        <div class="controls">
+          <button id="startButton" type="button">Start</button>
+          <button id="stopButton" type="button" disabled>Stop</button>
         </div>
       </section>
 
