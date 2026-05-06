@@ -48,6 +48,25 @@ button:disabled {
   padding: 28px 0 40px;
 }
 
+.warning-banner {
+  margin-bottom: 16px;
+  border: 1px solid #e7c98d;
+  border-radius: 10px;
+  background: #fff5dd;
+  padding: 14px 16px;
+  box-shadow: 0 10px 24px rgba(120, 88, 19, 0.08);
+}
+
+.warning-banner p {
+  color: #6b4d13;
+  font-size: 0.94rem;
+  line-height: 1.5;
+}
+
+.warning-banner strong {
+  color: #4f3607;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -120,6 +139,40 @@ h2 {
   overflow-wrap: anywhere;
   font-size: clamp(1.08rem, 2.2vw, 1.55rem);
   line-height: 1.1;
+}
+
+.backend-selector-metric {
+  display: grid;
+  gap: 10px;
+}
+
+.backend-options {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.backend-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 12px;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.backend-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.backend-option input:disabled + span {
+  color: #8a918e;
 }
 
 .threshold-metric input {

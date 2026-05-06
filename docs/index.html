@@ -16,6 +16,10 @@
   </head>
   <body>
     <main class="app-shell">
+      <section class="warning-banner" aria-label="Backend caution">
+        <p><strong>注意:</strong> スマホでは GPU で実行するとブラウザがクラッシュする可能性があります。安定性を優先する場合は CPU を選択してください。</p>
+      </section>
+
       <section class="topbar" aria-label="Smart Turn controls">
         <div>
           <p class="eyebrow">Local ONNX inference</p>
@@ -55,9 +59,18 @@
           <span class="metric-label">Feature avg</span>
           <strong id="featureAvgText">--</strong>
         </div>
-        <div class="metric">
-          <span class="metric-label">Backend</span>
-          <strong id="backendText">--</strong>
+        <div class="metric backend-selector-metric">
+          <span class="metric-label">Smart Turn backend</span>
+          <div class="backend-options">
+            <label class="backend-option" for="cpuBackendCheckbox">
+              <input id="cpuBackendCheckbox" type="checkbox" checked>
+              <span>CPU</span>
+            </label>
+            <label class="backend-option" for="gpuBackendCheckbox">
+              <input id="gpuBackendCheckbox" type="checkbox">
+              <span>GPU</span>
+            </label>
+          </div>
         </div>
       </section>
 

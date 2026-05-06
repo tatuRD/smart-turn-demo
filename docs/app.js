@@ -44,6 +44,8 @@
     smartTurnAvgText: document.getElementById("smartTurnAvgText"),
     featureAvgText: document.getElementById("featureAvgText"),
     backendText: document.getElementById("backendText"),
+    cpuBackendCheckbox: document.getElementById("cpuBackendCheckbox"),
+    gpuBackendCheckbox: document.getElementById("gpuBackendCheckbox"),
     detailText: document.getElementById("detailText"),
     graphCanvas: document.getElementById("graphCanvas"),
     historyList: document.getElementById("historyList"),
@@ -63,6 +65,7 @@
     smartTurn: null,
     featureExtractor: null,
     inferenceBackend: "--",
+    preferredBackend: inferInitialBackendPreference(),
     featureBackend: "--",
     vadQueue: new Float32Array(MAX_VAD_QUEUE_SAMPLES),
     vadQueueReadIndex: 0,
@@ -143,6 +146,86 @@
     return doc.querySelector('meta[name="app-version"]')?.content || "";
   }
 
+  function disposeOnnxValue(value) {
+    if (value && typeof value.dispose === "function") {
+      value.dispose();
+    }
+  }
+
+  function disposeOnnxValueMap(map) {
+    if (!map || typeof map !== "object") {
+      return;
+    }
+    for (const value of Object.values(map)) {
+      disposeOnnxValue(value);
+    }
+  }
+
+  function isLikelyMobileDevice() {
+    const ua = navigator.userAgent;
+    return /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
+  }
+
+  function inferInitialBackendPreference() {
+    if (!navigator.gpu) {
+      return "wasm";
+    }
+    return isLikelyMobileDevice() ? "wasm" : "webgpu";
+  }
+
+  function getBackendDisplayName(backend) {
+    return backend === "webgpu" ? "GPU" : "CPU";
+  }
+
+  function syncBackendControls() {
+    if (els.cpuBackendCheckbox) {
+      els.cpuBackendCheckbox.checked = state.preferredBackend === "wasm";
+      els.cpuBackendCheckbox.disabled = state.running;
+    }
+    if (els.gpuBackendCheckbox) {
+      els.gpuBackendCheckbox.checked = state.preferredBackend === "webgpu";
+      els.gpuBackendCheckbox.disabled = state.running || !navigator.gpu;
+    }
+  }
+
+  async function releaseOrtSessions() {
+    const releases = [];
+    if (state.vad?.session?.release) {
+      releases.push(state.vad.session.release().catch(() => {}));
+    }
+    if (state.smartTurn?.session?.release) {
+      releases.push(state.smartTurn.session.release().catch(() => {}));
+    }
+
+    state.vad = null;
+    state.smartTurn = null;
+    state.modelsReady = false;
+    state.inferenceBackend = getBackendDisplayName(state.preferredBackend);
+    updateBackendText();
+
+    if (releases.length > 0) {
+      await Promise.all(releases);
+    }
+  }
+
+  async function updateBackendPreference(nextBackend) {
+    const normalizedBackend = nextBackend === "webgpu" ? "webgpu" : "wasm";
+    if (state.running) {
+      syncBackendControls();
+      return;
+    }
+    if (state.preferredBackend === normalizedBackend) {
+      syncBackendControls();
+      return;
+    }
+
+    state.preferredBackend = normalizedBackend;
+    syncBackendControls();
+    await releaseOrtSessions();
+    setUiState("Idle");
+    els.detailText.textContent = `${getBackendDisplayName(state.preferredBackend)} を選択しました。次回 Start 時にこの backend を使います。`;
+  }
+
   class SileroVAD {
     constructor(session, runtime) {
       this.session = session;
@@ -179,16 +262,22 @@
         sr: new this.runtime.Tensor("int64", BigInt64Array.from([16000n]), []),
       };
 
-      const outputs = await this.session.run(feeds);
-      const names = this.session.outputNames;
-      const probTensor = outputs[names[0]];
-      const stateTensor = outputs[names[1]];
+      let outputs;
+      try {
+        outputs = await this.session.run(feeds);
+        const names = this.session.outputNames;
+        const probTensor = outputs[names[0]];
+        const stateTensor = outputs[names[1]];
 
-      this.vadState = new Float32Array(stateTensor.data);
-      this.context = input.slice(CHUNK);
-      this.maybeReset();
+        this.vadState = new Float32Array(stateTensor.data);
+        this.context = input.slice(CHUNK);
+        this.maybeReset();
 
-      return Number(probTensor.data[0]);
+        return Number(probTensor.data[0]);
+      } finally {
+        disposeOnnxValueMap(outputs);
+        disposeOnnxValueMap(feeds);
+      }
     }
   }
 
@@ -243,20 +332,28 @@
       const featureStarted = performance.now();
       const { features, yieldWaitMs } = await this.extractor.extract(audio);
       const featureMs = Math.max(0, performance.now() - featureStarted - yieldWaitMs);
-      const input = new this.runtime.Tensor("float32", features, [1, 80, 800]);
-
-      const onnxStarted = performance.now();
-      const outputs = await this.session.run({ input_features: input });
-      const onnxMs = performance.now() - onnxStarted;
-      const firstOutput = outputs[this.session.outputNames[0]];
-      const probability = Number(firstOutput.data[0]);
-      return {
-        probability,
-        timings: {
-          featureMs,
-          onnxMs,
-        },
+      const feeds = {
+        input_features: new this.runtime.Tensor("float32", features, [1, 80, 800]),
       };
+
+      let outputs;
+      try {
+        const onnxStarted = performance.now();
+        outputs = await this.session.run(feeds);
+        const onnxMs = performance.now() - onnxStarted;
+        const firstOutput = outputs[this.session.outputNames[0]];
+        const probability = Number(firstOutput.data[0]);
+        return {
+          probability,
+          timings: {
+            featureMs,
+            onnxMs,
+          },
+        };
+      } finally {
+        disposeOnnxValueMap(outputs);
+        disposeOnnxValueMap(feeds);
+      }
     }
   }
 
@@ -584,17 +681,16 @@
   }
 
   async function createSmartTurnSession(ortRuntime) {
-    if (await canUseWebGpu()) {
-      try {
-        const session = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurnGpu, {
-          executionProviders: ["webgpu"],
-          graphOptimizationLevel: "all",
-        });
-        await validateSmartTurnSession(ortRuntime, session);
-        return { session, backend: "WebGPU" };
-      } catch {
-        // Fall back to the CPU model when WebGPU initialization or validation fails.
+    if (state.preferredBackend === "webgpu") {
+      if (!(await canUseWebGpu())) {
+        throw new Error("GPU が利用できないため開始できません。CPU を選択してください。");
       }
+      const session = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurnGpu, {
+        executionProviders: [{ name: "webgpu" }],
+        graphOptimizationLevel: "all",
+      });
+      await validateSmartTurnSession(ortRuntime, session);
+      return { session, backend: "GPU" };
     }
 
     const session = await ortRuntime.InferenceSession.create(MODEL_PATHS.smartTurnCpu, {
@@ -603,17 +699,30 @@
       interOpNumThreads: 1,
       graphOptimizationLevel: "all",
     });
-    return { session, backend: "Wasm" };
+    return { session, backend: "CPU" };
   }
 
   async function validateSmartTurnSession(ortRuntime, smartSession) {
-    await smartSession.run({
+    const feeds = {
       input_features: new ortRuntime.Tensor("float32", new Float32Array(80 * SMART_INPUT_FRAMES), [1, 80, SMART_INPUT_FRAMES]),
-    });
+    };
+    let outputs;
+    try {
+      outputs = await smartSession.run(feeds);
+    } finally {
+      disposeOnnxValueMap(outputs);
+      disposeOnnxValueMap(feeds);
+    }
   }
 
   function updateBackendText() {
-    els.backendText.textContent = state.inferenceBackend;
+    if (!els.backendText) {
+      return;
+    }
+    const label = state.modelsReady
+      ? state.inferenceBackend
+      : `${getBackendDisplayName(state.preferredBackend)} (selected)`;
+    els.backendText.textContent = label;
   }
 
   async function ensureModels() {
@@ -628,6 +737,9 @@
       await ensureOrtRuntime();
       state.modelsReady = true;
       setUiState("Ready");
+    } catch (error) {
+      await releaseOrtSessions();
+      throw error;
     } finally {
       state.loading = false;
     }
@@ -671,6 +783,7 @@
       resetGraphHistory();
       state.running = true;
       setThresholdControlsDisabled(true);
+      syncBackendControls();
       els.stopButton.disabled = false;
       setUiState("Listening");
       els.detailText.textContent = `${state.uiState} | Input ${Math.round(state.audioContext.sampleRate)} Hz -> ${RATE} Hz | Backend ${state.inferenceBackend} | Features ${state.featureBackend}`;
@@ -712,6 +825,8 @@
     els.startButton.disabled = false;
     els.stopButton.disabled = true;
     setThresholdControlsDisabled(false);
+    syncBackendControls();
+    updateBackendText();
     setUiState(state.modelsReady ? "Ready" : "Idle");
   }
 
@@ -1230,8 +1345,28 @@
     }
   }
 
+  syncBackendControls();
+  updateBackendText();
   els.startButton.addEventListener("click", start);
   els.stopButton.addEventListener("click", stop);
+  if (els.cpuBackendCheckbox) {
+    els.cpuBackendCheckbox.addEventListener("change", () => {
+      if (!els.cpuBackendCheckbox.checked) {
+        syncBackendControls();
+        return;
+      }
+      void updateBackendPreference("wasm");
+    });
+  }
+  if (els.gpuBackendCheckbox) {
+    els.gpuBackendCheckbox.addEventListener("change", () => {
+      if (!els.gpuBackendCheckbox.checked) {
+        syncBackendControls();
+        return;
+      }
+      void updateBackendPreference("webgpu");
+    });
+  }
   if (els.vadThresholdSlider) {
     setVadThreshold(els.vadThresholdSlider.value);
     els.vadThresholdSlider.addEventListener("input", (event) => {
