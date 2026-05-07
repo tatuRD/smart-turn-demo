@@ -417,32 +417,45 @@
 
   function normalizePaddedAudio(audio, length) {
     const out = new Float32Array(length);
-    let sum = 0;
     if (audio.length >= length) {
       const start = audio.length - length;
+      let sum = 0;
       for (let i = 0; i < length; i += 1) {
         const value = audio[start + i];
         out[i] = value;
         sum += value;
       }
-    } else {
-      const offset = length - audio.length;
-      for (let i = 0; i < audio.length; i += 1) {
-        const value = audio[i];
-        out[offset + i] = value;
-        sum += value;
+      const mean = sum / length;
+      let variance = 0;
+      for (let i = 0; i < length; i += 1) {
+        const diff = out[i] - mean;
+        variance += diff * diff;
       }
+      const scale = Math.sqrt(variance / length + 1e-7);
+      for (let i = 0; i < length; i += 1) {
+        out[i] = (out[i] - mean) / scale;
+      }
+      return out;
     }
 
-    const mean = sum / length;
+    if (audio.length === 0) {
+      return out;
+    }
+
+    let sum = 0;
+    for (let i = 0; i < audio.length; i += 1) {
+      sum += audio[i];
+    }
+    const mean = sum / audio.length;
     let variance = 0;
-    for (let i = 0; i < out.length; i += 1) {
-      const diff = out[i] - mean;
+    for (let i = 0; i < audio.length; i += 1) {
+      const diff = audio[i] - mean;
       variance += diff * diff;
     }
-    const scale = Math.sqrt(variance / length + 1e-7);
-    for (let i = 0; i < out.length; i += 1) {
-      out[i] = (out[i] - mean) / scale;
+    const scale = Math.sqrt(variance / audio.length + 1e-7);
+    const offset = length - audio.length;
+    for (let i = 0; i < audio.length; i += 1) {
+      out[offset + i] = (audio[i] - mean) / scale;
     }
     return out;
   }
